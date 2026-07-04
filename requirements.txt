@@ -3,5 +3,5 @@ numpy
 pyyaml
 requests
 tqdm
-pandas
+datasets
 Jinja2

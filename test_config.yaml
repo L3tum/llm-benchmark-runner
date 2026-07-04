@@ -1,0 +1,17 @@
+models:
+  - display_name: "TestModel"
+    model: "model"
+    cmd: "sleep 1"  # will not work as a real proxy, but tests the flow
+    proxy: "http://localhost:12345/v1"
+
+benchmarks:
+  - mmlu_pro
+  - kld
+
+benchmark:
+  mmlu_pro:
+    num_samples: 1
+    subjects: "astronomy"
+  kld:
+    num_prompts: 1
+    prompt_source: mmlu
