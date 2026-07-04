@@ -1,0 +1,51 @@
+# Model configurations for the benchmark suite.
+# gguf_path is optional: if omitted, perplexity will skip or fall back to API.
+# Use skip_perplexity to disable perplexity completely.
+
+models:
+  # Example: same model, different quantizations
+  - display_name: "MyModel Q4_K_M"
+    llama_swap_model: "mymodel-q4"           # model name as registered in llama-swap
+    gguf_path: "/path/to/mymodel.Q4_K_M.gguf"  # optional: path to GGUF for perplexity binary
+    # Optional: target KLD from a published benchmark
+    # target_kld: 0.12
+
+  - display_name: "MyModel Q5_K_M"
+    llama_swap_model: "mymodel-q5"
+    gguf_path: null  # omit or null: no perplexity
+    skip_perplexity: true  # or explicitly skip perplexity
+
+  - display_name: "MyModel Q8_0"
+    llama_swap_model: "mymodel-q8"
+    # gguf_path omitted entirely: perplexity skipped
+
+  # Different model
+  - display_name: "OtherModel Q4_K_M"
+    llama_swap_model: "othermodel-q4"
+    gguf_path: "/path/to/othermodel.Q4_K_M.gguf"
+
+  # Example: cached reference model (unquantized base) for KLD
+  # - display_name: "MyModel Unquantized (cached)"
+  #   llama_swap_model: "dummy"  # unused
+  #   cached_logits_path: "/path/to/mymodel_base_toplogprobs.json"
+  #   gguf_path: null
+
+# Global sample size for MMLU and KLD prompts
+num_samples: 100     # MMLU questions AND KLD prompts (if source=mmlu)
+
+# API endpoint for llama-swap's OpenAI-compatible server
+api_url: "http://localhost:28287/v1"
+
+# Llama.cpp binary path (if available) for perplexity
+llama_perplexity_path: "llama-perplexity"  # will be found in PATH if not absolute
+
+# MMLU benchmark settings (override global num_samples if set)
+mmlu:
+  num_samples: null  # if null, uses global num_samples
+  subset_path: null
+
+# KLD benchmark settings
+kld:
+  num_prompts: null   # if null, uses global num_samples
+  prompt_source: "mmlu"
+  custom_prompts_path: null

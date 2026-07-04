@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "What is the capital of France?",
+    "top_logprobs": [
+      {"token": "P", "logprob": -2.1},
+      {"token": "Paris", "logprob": -0.8},
+      {"token": "paris", "logprob": -1.2},
+      {"token": "London", "logprob": -3.5},
+      {"token": "Berlin", "logprob": -4.1}
+    ]
+  },
+  {
+    "prompt": "Solve: 2 + 2 =",
+    "top_logprobs": [
+      {"token": "4", "logprob": -0.1},
+      {"token": "Four", "logprob": -1.5},
+      {"token": "five", "logprob": -5.0},
+      {"token": "2", "logprob": -7.2},
+      {"token": "three", "logprob": -8.0}
+    ]
+  }
+]

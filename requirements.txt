@@ -1,0 +1,7 @@
+openai>=1.0.0
+numpy
+pyyaml
+requests
+tqdm
+pandas
+Jinja2
