@@ -53,7 +53,7 @@ pub fn run_model(
     Ok((serde_json::json!(model_results), new_successful, new_failed))
 }
 #[cfg(unix)]
-fn start_model(cmd: &str) -> Result<Child> {
+pub fn start_model(cmd: &str) -> Result<Child> {
     let process = unsafe {
         Command::new("/bin/bash")
             .arg("-c")
@@ -70,7 +70,7 @@ fn start_model(cmd: &str) -> Result<Child> {
     Ok(process)
 }
 #[cfg(not(unix))]
-fn start_model(cmd: &str) -> Result<Child> {
+pub fn start_model(cmd: &str) -> Result<Child> {
     let process = Command::new("/bin/bash")
         .arg("-c")
         .arg(cmd)
@@ -80,7 +80,7 @@ fn start_model(cmd: &str) -> Result<Child> {
         .spawn()?;
     Ok(process)
 }
-fn wait_for_health(client: &Client) -> bool {
+pub fn wait_for_health(client: &Client) -> bool {
     let timeout = Duration::from_secs(120);
     let poll = Duration::from_secs(2);
     let deadline = Instant::now() + timeout;
@@ -92,7 +92,7 @@ fn wait_for_health(client: &Client) -> bool {
     }
     false
 }
-fn stop_model(cmd_stop: &Option<String>, mut process: Child) {
+pub fn stop_model(cmd_stop: &Option<String>, mut process: Child) {
     let mut stopped = false;
     if let Some(cmd) = cmd_stop {
         if let Ok(output) = Command::new("/bin/bash").arg("-c").arg(cmd).output() {

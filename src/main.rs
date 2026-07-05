@@ -28,6 +28,10 @@ enum Commands {
         #[arg(long)]
         no_resume: bool,
     },
+    TestModels {
+        #[arg(short, long, default_value = DEFAULT_CONFIG)]
+        config: String,
+    },
     Report {
         #[arg(short, long, default_value = RESULTS_FILE)]
         results: String,
@@ -40,6 +44,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Run { config, no_resume } => run_benchmarks(&config, no_resume),
+        Commands::TestModels { config } => test_models(&config),
         Commands::Report { results, output } => generate_report(&results, &output),
     }
 }
@@ -182,6 +187,85 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     report::generate_reports(&final_results, output_dir)?;
     println!("\nBenchmark complete.");
     Ok(())
+}
+
+fn test_models(config_path: &str) -> Result<()> {
+    println!("Loading config: {}", config_path);
+    let config = config::load_config(config_path)?;
+    if config.models.is_empty() {
+        return Err(anyhow::anyhow!("No models defined in config"));
+    }
+
+    let mut results: Vec<(String, bool, String)> = Vec::new(); // name, success, message
+
+    for model in &config.models {
+        println!("\n  Testing model: {} ...", model.display_name);
+        let process = match runner::start_model(&model.cmd) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("  FAIL: Failed to start model: {}", e);
+                results.push((model.display_name.clone(), false, format!("start error: {}", e)));
+                continue;
+            }
+        };
+
+        let client = match client::Client::new(&model.proxy) {
+            Ok(c) => c,
+            Err(e) => {
+                runner::stop_model(&model.cmd_stop, process);
+                eprintln!("  FAIL: Failed to create client: {}", e);
+                results.push((model.display_name.clone(), false, format!("client error: {}", e)));
+                continue;
+            }
+        };
+
+        if !runner::wait_for_health(&client) {
+            runner::stop_model(&model.cmd_stop, process);
+            eprintln!("  FAIL: Model proxy did not become healthy");
+            results.push((model.display_name.clone(), false, "proxy not healthy".to_string()));
+            continue;
+        }
+        println!("  Proxy healthy.");
+
+        // Send test prompt
+        let test_prompt = "Say hello in one word.";
+        let test_system = "You are a helpful assistant.";
+        let model_name_for_api = &model.model_name;
+        match client.chat_completion(model_name_for_api, test_system, test_prompt) {
+            Ok(response) => {
+                println!("  Prompt: {}", test_prompt);
+                println!("  Response: {}", response);
+                println!("  SUCCESS");
+                results.push((model.display_name.clone(), true, response.clone()));
+            }
+            Err(e) => {
+                eprintln!("  FAIL: Chat completion failed: {}", e);
+                results.push((model.display_name.clone(), false, format!("chat error: {}", e)));
+            }
+        }
+
+        println!("  Stopping model: {}", model.display_name);
+        runner::stop_model(&model.cmd_stop, process);
+    }
+
+    // Print summary
+    println!("\n=== Test Summary ===");
+    for (name, success, msg) in &results {
+        if *success {
+            println!("  [PASS] {}", name);
+        } else {
+            println!("  [FAIL] {} - {}", name, msg);
+        }
+    }
+    let pass_count = results.iter().filter(|(_, s, _)| *s).count();
+    let fail_count = results.iter().filter(|(_, s, _)| !*s).count();
+    println!("  Total: {} tests, {} passed, {} failed", results.len(), pass_count, fail_count);
+
+    if fail_count > 0 {
+        Err(anyhow::anyhow!("Some model tests failed"))
+    } else {
+        Ok(())
+    }
 }
 
 fn load_existing_results(path: &str) -> Result<Option<serde_json::Value>> {

@@ -73,6 +73,23 @@ Results are saved to `benchmark_results/`:
 
 **Resuming**: kill the process, rerun — it will skip models already completed.
 
+## Testing Models (Without Running Benchmarks)
+
+Before running full benchmarks, you can validate that each model's configuration works (start, health, prompt, stop):
+
+```bash
+python benchmark_runner.py test-models --config models_config.yaml
+```
+
+This command:
+1. Starts each model with `cmd`
+2. Waits for the proxy to become healthy
+3. Sends a simple test prompt: "Say hello in one word."
+4. Stops the model with `cmdStop` (or SIGTERM/SIGKILL)
+5. Prints a summary table (PASS/FAIL) for each model
+
+Useful for CI/CD pipelines or quickly verifying config changes without spending time on full benchmarks.
+
 ## Adding New Benchmarks
 
 1. Create `benchmarks/my_bench.py` with:
