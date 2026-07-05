@@ -235,10 +235,19 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     // Post-execute
     println!("\nPost-execution phase:");
     let mut kld_pairwise = serde_json::Map::new();
-    if let Ok(kld_result) = benchmarks::post_execute_benchmark("kld", &all_models_results) {
-        if let Some(map) = kld_result.as_object() {
-            for (k, v) in map {
-                kld_pairwise.insert(k.clone(), v.clone());
+    for bench_name in &benchmarks {
+        match benchmarks::post_execute_benchmark(bench_name, &all_models_results) {
+            Ok(post_result) => {
+                if bench_name == "kld" {
+                    if let Some(map) = post_result.as_object() {
+                        for (k, v) in map {
+                            kld_pairwise.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: post-execute {} failed: {}", bench_name, e);
             }
         }
     }
@@ -315,9 +324,18 @@ fn test_models(config_path: &str) -> Result<()> {
         let test_system = "You are a helpful assistant.";
         let model_name_for_api = &model.model_name;
         match client.chat_completion(model_name_for_api, test_system, test_prompt) {
-            Ok(response) => {
+            Ok((response, output_tokens, thinking_tokens)) => {
                 println!("  Prompt: {}", test_prompt);
                 println!("  Response: {}", response);
+                println!(
+                    "  Tokens: output={}, thinking={}",
+                    output_tokens
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "–".to_string()),
+                    thinking_tokens
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "–".to_string())
+                );
                 println!("  SUCCESS");
                 results.push((model.display_name.clone(), true, response.clone()));
             }

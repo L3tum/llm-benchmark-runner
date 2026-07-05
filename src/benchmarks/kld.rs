@@ -119,15 +119,19 @@ impl super::Benchmark for KldBenchmark {
         }
 
         let mut model_logprobs: Vec<Vec<LogprobEntry>> = Vec::new();
+        let mut total_output_tokens: u64 = 0;
+        let mut total_thinking_tokens: u64 = 0;
         let mut failed = 0;
 
         for prompt in &prompts {
-            match client.chat_completion_logprobs(
+            match client.chat_completion_logprobs_with_usage(
                 &model.model_name,
                 "You are a helpful assistant.",
                 prompt,
             ) {
-                Ok(logprobs) => {
+                Ok((logprobs, output_tokens, thinking_tokens)) => {
+                    total_output_tokens += output_tokens.unwrap_or(0);
+                    total_thinking_tokens += thinking_tokens.unwrap_or(0);
                     model_logprobs.push(logprobs);
                 }
                 Err(e) => {
@@ -151,6 +155,8 @@ impl super::Benchmark for KldBenchmark {
             "model": model.display_name,
             "num_prompts": prompts.len(),
             "kld": model_logprobs,
+            "output_tokens": total_output_tokens,
+            "thinking_tokens": total_thinking_tokens,
         }))
     }
 

@@ -77,6 +77,8 @@ impl super::Benchmark for AimeBenchmark {
 
         let mut correct = 0usize;
         let mut total = 0usize;
+        let mut total_output_tokens: u64 = 0;
+        let mut total_thinking_tokens: u64 = 0;
         let mut problem_results: HashMap<usize, serde_json::Value> = HashMap::new();
 
         for (idx, q) in questions.iter().enumerate() {
@@ -86,7 +88,10 @@ impl super::Benchmark for AimeBenchmark {
                 problem_text
             );
 
-            let response = client.chat_completion(&model.model_name, "", &prompt)?;
+            let (response, output_tokens, thinking_tokens) =
+                client.chat_completion(&model.model_name, "", &prompt)?;
+            total_output_tokens += output_tokens.unwrap_or(0);
+            total_thinking_tokens += thinking_tokens.unwrap_or(0);
             let extracted_answer = extract_int_answer(&response);
             let is_correct = extracted_answer.as_deref() == Some(&q.answer);
             if is_correct {
@@ -115,6 +120,8 @@ impl super::Benchmark for AimeBenchmark {
             "total_questions": total,
             "correct": correct,
             "problem_results": problem_results,
+            "output_tokens": total_output_tokens,
+            "thinking_tokens": total_thinking_tokens,
         }))
     }
 }

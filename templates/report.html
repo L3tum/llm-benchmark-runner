@@ -26,10 +26,32 @@
   <h2>Models Evaluated</h2>
   <p>{{ models_evaluated }}</p>
 
+  <h2>🔢 Token Usage</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Benchmark</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in token_usage_results.iter() %}
+      {% set model = entry.0 %}
+      {% for bench_entry in entry.1.iter() %}
+      {% set benchmark = bench_entry.0 %}
+      {% set row = bench_entry.1 %}
+      <tr>
+        <td>{{ model }}</td>
+        <td>{{ benchmark }}</td>
+        <td>{{ row.output_tokens }}</td>
+        <td>{{ row.thinking_tokens }}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+
   <h2>📝 MMLU-Pro Accuracy (higher is better)</h2>
   <table>
     <thead>
-      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th></tr>
+      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
     </thead>
     <tbody>
       {% for entry in mmlu_pro_results.iter() %}
@@ -39,6 +61,8 @@
         <td>{{ model }}</td>
         <td>{{ data.accuracy_pct }}%</td>
         <td>{{ data.total_questions }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -70,7 +94,7 @@
   <h2>🔬 GPQA Diamond Accuracy (higher is better)</h2>
   <table>
     <thead>
-      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th></tr>
+      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
     </thead>
     <tbody>
       {% for entry in gpqa_results.iter() %}
@@ -80,6 +104,8 @@
         <td>{{ model }}</td>
         <td>{{ data.accuracy_pct }}%</td>
         <td>{{ data.total_questions }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -111,7 +137,7 @@
   <h2>🧮 AIME 2025 Accuracy (higher is better)</h2>
   <table>
     <thead>
-      <tr><th>Model</th><th>Accuracy</th><th>Total Questions</th><th>Correct</th></tr>
+      <tr><th>Model</th><th>Accuracy</th><th>Total Questions</th><th>Correct</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
     </thead>
     <tbody>
       {% for entry in aime_results.iter() %}
@@ -122,6 +148,8 @@
         <td>{{ data.accuracy_pct }}%</td>
         <td>{{ data.total_questions }}</td>
         <td>{{ data.correct }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -130,7 +158,7 @@
   <h2>📐 MATH-500 Accuracy (higher is better)</h2>
   <table>
     <thead>
-      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th></tr>
+      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
     </thead>
     <tbody>
       {% for entry in math500_results.iter() %}
@@ -140,6 +168,8 @@
         <td>{{ model }}</td>
         <td>{{ data.accuracy_pct }}%</td>
         <td>{{ data.total_questions }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -168,13 +198,34 @@
     </tbody>
   </table>
 
+  <h2>⛏️ Minebench Voxel JSON</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Valid JSON</th><th>Valid Buildings</th><th>Output Files</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in minebench_results.iter() %}
+      {% set model = entry.0 %}
+      {% set data = entry.1 %}
+      <tr class="{% if data.json_valid %}best{% endif %}">
+        <td>{{ model }}</td>
+        <td>{{ data.json_valid_str }}</td>
+        <td>{{ data.valid_buildings }}/{{ data.total_buildings }}</td>
+        <td>{{ data.output_file }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
   <h2>🔁 KLD (Kullback-Leibler Divergence)</h2>
   <p>Average KL divergence between model output distributions (lower = more similar).</p>
 
   <h3>Average KLD to All Other Models</h3>
   <table>
     <thead>
-      <tr><th>Model</th><th>Avg KLD to Others</th></tr>
+      <tr><th>Model</th><th>Avg KLD to Others</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
     </thead>
     <tbody>
       {% for entry in avg_kld_to_others.iter() %}
@@ -183,6 +234,8 @@
       <tr class="{% if data.best %}best{% endif %}">
         <td>{{ model }}</td>
         <td>{{ data.avg_kld_to_others_str }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
       </tr>
       {% endfor %}
     </tbody>

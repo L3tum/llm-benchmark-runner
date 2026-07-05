@@ -10,6 +10,7 @@ benchmarks:
   - gpqa
   - aime
   - math500
+  - minebench
 
 benchmark:
   mmlu_pro:
@@ -28,3 +29,7 @@ benchmark:
   math500:
     num_samples: 1
     subjects: "algebra"
+  minebench:
+    buildings: [castle, dragon, train]
+    # Optional legacy/custom single prompt:
+    # build: "A compact test castle"

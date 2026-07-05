@@ -7,6 +7,7 @@ pub mod aime;
 pub mod gpqa;
 pub mod kld;
 pub mod math500;
+pub mod minebench;
 pub mod mmlu_pro;
 
 /// Trait for all benchmarks.
@@ -48,6 +49,10 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "math500".to_string(),
             Box::new(math500::Math500Benchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "minebench".to_string(),
+            Box::new(minebench::MinebenchBenchmark) as Box<dyn Benchmark>,
         );
         map
     })

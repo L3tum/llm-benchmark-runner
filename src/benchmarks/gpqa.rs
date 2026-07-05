@@ -114,6 +114,8 @@ impl super::Benchmark for GpqaBenchmark {
 
         let mut category_record: HashMap<String, serde_json::Value> = HashMap::new();
         let mut total_questions = 0usize;
+        let mut total_output_tokens: u64 = 0;
+        let mut total_thinking_tokens: u64 = 0;
 
         let choice_map = "ABCD";
 
@@ -149,7 +151,10 @@ impl super::Benchmark for GpqaBenchmark {
                 }
                 prompt.push_str("Answer: ");
 
-                let response = client.chat_completion(&model.model_name, "", &prompt)?;
+                let (response, output_tokens, thinking_tokens) =
+                    client.chat_completion(&model.model_name, "", &prompt)?;
+                total_output_tokens += output_tokens.unwrap_or(0);
+                total_thinking_tokens += thinking_tokens.unwrap_or(0);
                 let pred = extract_answer(&response).ok_or_else(|| {
                     eprintln!("  Error extracting answer from: {}", response);
                     anyhow::anyhow!("Cannot extract answer")
@@ -195,6 +200,8 @@ impl super::Benchmark for GpqaBenchmark {
             "accuracy": overall_accuracy,
             "results_by_subject": category_record,
             "total_questions": total_questions,
+            "output_tokens": total_output_tokens,
+            "thinking_tokens": total_thinking_tokens,
         }))
     }
 }

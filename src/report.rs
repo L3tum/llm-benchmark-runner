@@ -11,6 +11,8 @@ struct MmluProResult {
     accuracy: f64,
     accuracy_pct: String, // pre-rounded
     total_questions: i64,
+    output_tokens: String,
+    thinking_tokens: String,
     results_by_subject: HashMap<String, SubjectResult>,
     best: bool,
 }
@@ -21,6 +23,8 @@ struct GpqaResult {
     accuracy: f64,
     accuracy_pct: String,
     total_questions: i64,
+    output_tokens: String,
+    thinking_tokens: String,
     results_by_subject: HashMap<String, SubjectResult>,
     best: bool,
 }
@@ -32,6 +36,8 @@ struct AimeResult {
     accuracy_pct: String,
     total_questions: i64,
     correct: i64,
+    output_tokens: String,
+    thinking_tokens: String,
     best: bool,
 }
 
@@ -41,6 +47,8 @@ struct Math500Result {
     accuracy: f64,
     accuracy_pct: String,
     total_questions: i64,
+    output_tokens: String,
+    thinking_tokens: String,
     results_by_subject: HashMap<String, SubjectResult>,
     best: bool,
 }
@@ -67,6 +75,8 @@ struct KldPairResult {
 struct KldAvgResult {
     avg_kld_to_others: f64,
     avg_kld_to_others_str: String, // pre-rounded
+    output_tokens: String,
+    thinking_tokens: String,
     klds: Vec<f64>,
     best: bool,
 }
@@ -76,6 +86,23 @@ struct KldAvgResult {
 struct KldResults {
     pairwise: HashMap<String, KldPairResult>,
     avg_kld_to_others: HashMap<String, KldAvgResult>,
+}
+
+#[derive(Serialize)]
+struct TokenUsageResult {
+    output_tokens: String,
+    thinking_tokens: String,
+}
+
+#[derive(Serialize)]
+struct MinebenchResult {
+    json_valid: bool,
+    json_valid_str: String,
+    valid_buildings: i64,
+    total_buildings: i64,
+    output_file: String,
+    output_tokens: String,
+    thinking_tokens: String,
 }
 
 pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Result<()> {
@@ -89,6 +116,8 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
     let gpqa_results = extract_gpqa_results(results);
     let aime_results = extract_aime_results(results);
     let math500_results = extract_math500_results(results);
+    let minebench_results = extract_minebench_results(results);
+    let token_usage_results = extract_token_usage_results(results);
     let kld_results = convert_kld_results(results);
 
     let summary = generate_summary(
@@ -96,6 +125,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         &gpqa_results,
         &aime_results,
         &math500_results,
+        &minebench_results,
         &kld_results,
     );
     let timestamp = chrono::Utc::now()
@@ -111,6 +141,8 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         gpqa_results: &gpqa_results,
         aime_results: &aime_results,
         math500_results: &math500_results,
+        minebench_results: &minebench_results,
+        token_usage_results: &token_usage_results,
         kld_results: &kld_results.pairwise,
         avg_kld_to_others: &kld_results.avg_kld_to_others,
         summary: &summary,
@@ -129,6 +161,8 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         &gpqa_results,
         &aime_results,
         &math500_results,
+        &minebench_results,
+        &token_usage_results,
         &kld_results,
         &summary,
     );
@@ -152,6 +186,8 @@ pub struct ReportTemplate<'a> {
     gpqa_results: &'a HashMap<String, GpqaResult>,
     aime_results: &'a HashMap<String, AimeResult>,
     math500_results: &'a HashMap<String, Math500Result>,
+    minebench_results: &'a HashMap<String, MinebenchResult>,
+    token_usage_results: &'a HashMap<String, HashMap<String, TokenUsageResult>>,
     kld_results: &'a HashMap<String, KldPairResult>,
     avg_kld_to_others: &'a HashMap<String, KldAvgResult>,
     summary: &'a Vec<String>,
@@ -222,6 +258,8 @@ fn extract_mmlu_results(results: &serde_json::Value) -> HashMap<String, MmluProR
                         accuracy,
                         accuracy_pct,
                         total_questions,
+                        output_tokens: format_optional_u64(mmlu.get("output_tokens")),
+                        thinking_tokens: format_optional_u64(mmlu.get("thinking_tokens")),
                         results_by_subject,
                         best,
                     },
@@ -295,6 +333,8 @@ fn extract_gpqa_results(results: &serde_json::Value) -> HashMap<String, GpqaResu
                         accuracy,
                         accuracy_pct,
                         total_questions,
+                        output_tokens: format_optional_u64(gpqa.get("output_tokens")),
+                        thinking_tokens: format_optional_u64(gpqa.get("thinking_tokens")),
                         results_by_subject,
                         best,
                     },
@@ -333,6 +373,8 @@ fn extract_aime_results(results: &serde_json::Value) -> HashMap<String, AimeResu
                         accuracy_pct,
                         total_questions,
                         correct,
+                        output_tokens: format_optional_u64(aime.get("output_tokens")),
+                        thinking_tokens: format_optional_u64(aime.get("thinking_tokens")),
                         best,
                     },
                 );
@@ -405,6 +447,8 @@ fn extract_math500_results(results: &serde_json::Value) -> HashMap<String, Math5
                         accuracy,
                         accuracy_pct,
                         total_questions,
+                        output_tokens: format_optional_u64(math.get("output_tokens")),
+                        thinking_tokens: format_optional_u64(math.get("thinking_tokens")),
                         results_by_subject,
                         best,
                     },
@@ -413,6 +457,98 @@ fn extract_math500_results(results: &serde_json::Value) -> HashMap<String, Math5
         }
     }
     map
+}
+
+fn extract_minebench_results(results: &serde_json::Value) -> HashMap<String, MinebenchResult> {
+    let mut map = HashMap::new();
+    let models = results.get("models").and_then(|v| v.as_object());
+    if let Some(models) = models {
+        for (name, data) in models {
+            if let Some(minebench) = data.get("minebench").and_then(|v| v.as_object()) {
+                let json_valid = minebench
+                    .get("json_valid")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let total_buildings = minebench
+                    .get("total_buildings")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1);
+                let valid_buildings = minebench
+                    .get("valid_buildings")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(if json_valid { total_buildings } else { 0 });
+                let output_file = minebench
+                    .get("output_files")
+                    .and_then(|v| v.as_array())
+                    .map(|files| {
+                        files
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .or_else(|| {
+                        minebench
+                            .get("output_file")
+                            .and_then(|v| v.as_str())
+                            .map(ToOwned::to_owned)
+                    })
+                    .unwrap_or_default();
+                map.insert(
+                    name.clone(),
+                    MinebenchResult {
+                        json_valid,
+                        json_valid_str: if json_valid { "yes" } else { "no" }.to_string(),
+                        valid_buildings,
+                        total_buildings,
+                        output_file,
+                        output_tokens: format_optional_u64(minebench.get("output_tokens")),
+                        thinking_tokens: format_optional_u64(minebench.get("thinking_tokens")),
+                    },
+                );
+            }
+        }
+    }
+    map
+}
+
+fn extract_token_usage_results(
+    results: &serde_json::Value,
+) -> HashMap<String, HashMap<String, TokenUsageResult>> {
+    let mut map = HashMap::new();
+    let models = results.get("models").and_then(|v| v.as_object());
+    if let Some(models) = models {
+        for (model_name, data) in models {
+            let mut benchmark_map = HashMap::new();
+            if let Some(model_obj) = data.as_object() {
+                for (benchmark, value) in model_obj {
+                    let Some(obj) = value.as_object() else {
+                        continue;
+                    };
+                    if obj.contains_key("output_tokens") || obj.contains_key("thinking_tokens") {
+                        benchmark_map.insert(
+                            benchmark.clone(),
+                            TokenUsageResult {
+                                output_tokens: format_optional_u64(obj.get("output_tokens")),
+                                thinking_tokens: format_optional_u64(obj.get("thinking_tokens")),
+                            },
+                        );
+                    }
+                }
+            }
+            if !benchmark_map.is_empty() {
+                map.insert(model_name.clone(), benchmark_map);
+            }
+        }
+    }
+    map
+}
+
+fn format_optional_u64(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(|v| v.as_u64())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "–".to_string())
 }
 
 fn convert_kld_results(results: &serde_json::Value) -> KldResults {
@@ -438,11 +574,23 @@ fn convert_kld_results(results: &serde_json::Value) -> KldResults {
                 ) {
                     let best = best_avg == Some(avg);
                     let klds_vec: Vec<f64> = klds.iter().filter_map(|v| v.as_f64()).collect();
+                    let model_kld = results
+                        .get("models")
+                        .and_then(|v| v.get(name))
+                        .and_then(|v| v.get("kld"));
                     avg_kld_to_others.insert(
                         name.clone(),
                         KldAvgResult {
                             avg_kld_to_others: avg,
                             avg_kld_to_others_str: format!("{:.3}", avg),
+                            output_tokens: format_optional_u64(
+                                val.get("output_tokens")
+                                    .or_else(|| model_kld.and_then(|v| v.get("output_tokens"))),
+                            ),
+                            thinking_tokens: format_optional_u64(
+                                val.get("thinking_tokens")
+                                    .or_else(|| model_kld.and_then(|v| v.get("thinking_tokens"))),
+                            ),
                             klds: klds_vec,
                             best,
                         },
@@ -489,6 +637,7 @@ fn generate_summary(
     gpqa_results: &HashMap<String, GpqaResult>,
     aime_results: &HashMap<String, AimeResult>,
     math500_results: &HashMap<String, Math500Result>,
+    minebench_results: &HashMap<String, MinebenchResult>,
     kld_results: &KldResults,
 ) -> Vec<String> {
     let mut summary = Vec::new();
@@ -548,6 +697,18 @@ fn generate_summary(
         ));
     }
 
+    if !minebench_results.is_empty() {
+        let valid = minebench_results
+            .values()
+            .filter(|result| result.json_valid)
+            .count();
+        summary.push(format!(
+            "Minebench valid JSON: {}/{} models",
+            valid,
+            minebench_results.len()
+        ));
+    }
+
     // KLD summary
     if let Some((model, data)) =
         kld_results
@@ -582,6 +743,8 @@ fn generate_markdown_report(
     gpqa_results: &HashMap<String, GpqaResult>,
     aime_results: &HashMap<String, AimeResult>,
     math500_results: &HashMap<String, Math500Result>,
+    minebench_results: &HashMap<String, MinebenchResult>,
+    token_usage_results: &HashMap<String, HashMap<String, TokenUsageResult>>,
     kld_results: &KldResults,
     summary: &[String],
 ) -> String {
@@ -591,14 +754,28 @@ fn generate_markdown_report(
         models_evaluated.join(", ")
     );
 
+    if !token_usage_results.is_empty() {
+        md.push_str("\n## Token Usage\n\n| Model | Benchmark | Output Tokens | Thinking Tokens |\n|-------|-----------|---------------|-----------------|\n");
+        for (model, benchmarks) in token_usage_results {
+            for (benchmark, row) in benchmarks {
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    model, benchmark, row.output_tokens, row.thinking_tokens
+                ));
+            }
+        }
+    }
+
     // MMLU-Pro
-    md.push_str("\n## MMLU-Pro Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions |\n|-------|-----------------|-----------------|\n");
+    md.push_str("\n## MMLU-Pro Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions | Output Tokens | Thinking Tokens |\n|-------|------------------|-----------------|---------------|-----------------|\n");
     for (model, data) in mmlu_pro_results {
         md.push_str(&format!(
-            "| {} | {:.1}% | {} |\n",
+            "| {} | {:.1}% | {} | {} | {} |\n",
             model,
             data.accuracy * 100.0,
-            data.total_questions
+            data.total_questions,
+            data.output_tokens,
+            data.thinking_tokens
         ));
     }
 
@@ -618,13 +795,15 @@ fn generate_markdown_report(
 
     // GPQA Diamond
     if !gpqa_results.is_empty() {
-        md.push_str("\n## GPQA Diamond Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions |\n|-------|-----------------|-----------------|\n");
+        md.push_str("\n## GPQA Diamond Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions | Output Tokens | Thinking Tokens |\n|-------|------------------|-----------------|---------------|-----------------|\n");
         for (model, data) in gpqa_results {
             md.push_str(&format!(
-                "| {} | {:.1}% | {} |\n",
+                "| {} | {:.1}% | {} | {} | {} |\n",
                 model,
                 data.accuracy * 100.0,
-                data.total_questions
+                data.total_questions,
+                data.output_tokens,
+                data.thinking_tokens
             ));
         }
 
@@ -645,27 +824,31 @@ fn generate_markdown_report(
 
     // AIME
     if !aime_results.is_empty() {
-        md.push_str("\n## AIME 2025 Accuracy (higher is better)\n\n| Model | Accuracy | Total Questions | Correct |\n|-------|----------|-----------------|---------|\n");
+        md.push_str("\n## AIME 2025 Accuracy (higher is better)\n\n| Model | Accuracy | Total Questions | Correct | Output Tokens | Thinking Tokens |\n|-------|----------|-----------------|---------|---------------|-----------------|\n");
         for (model, data) in aime_results {
             md.push_str(&format!(
-                "| {} | {:.1}% | {} | {} |\n",
+                "| {} | {:.1}% | {} | {} | {} | {} |\n",
                 model,
                 data.accuracy * 100.0,
                 data.total_questions,
-                data.correct
+                data.correct,
+                data.output_tokens,
+                data.thinking_tokens
             ));
         }
     }
 
     // MATH-500
     if !math500_results.is_empty() {
-        md.push_str("\n## MATH-500 Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions |\n|-------|-----------------|-----------------|\n");
+        md.push_str("\n## MATH-500 Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions | Output Tokens | Thinking Tokens |\n|-------|------------------|-----------------|---------------|-----------------|\n");
         for (model, data) in math500_results {
             md.push_str(&format!(
-                "| {} | {:.1}% | {} |\n",
+                "| {} | {:.1}% | {} | {} | {} |\n",
                 model,
                 data.accuracy * 100.0,
-                data.total_questions
+                data.total_questions,
+                data.output_tokens,
+                data.thinking_tokens
             ));
         }
 
@@ -684,11 +867,31 @@ fn generate_markdown_report(
         }
     }
 
+    // Minebench
+    if !minebench_results.is_empty() {
+        md.push_str("\n## Minebench Voxel JSON\n\n| Model | Valid JSON | Valid Buildings | Output Files | Output Tokens | Thinking Tokens |\n|-------|------------|-----------------|--------------|---------------|-----------------|\n");
+        for (model, data) in minebench_results {
+            md.push_str(&format!(
+                "| {} | {} | {}/{} | `{}` | {} | {} |\n",
+                model,
+                data.json_valid_str,
+                data.valid_buildings,
+                data.total_buildings,
+                data.output_file,
+                data.output_tokens,
+                data.thinking_tokens
+            ));
+        }
+    }
+
     // KLD
     if !kld_results.avg_kld_to_others.is_empty() || !kld_results.pairwise.is_empty() {
-        md.push_str("\n## KLD (Kullback-Leibler Divergence)\n\nAverage KL divergence (lower = more similar output distributions).\n\n### Average KLD to All Other Models\n\n| Model | Avg KLD |\n|-------|---------|\n");
+        md.push_str("\n## KLD (Kullback-Leibler Divergence)\n\nAverage KL divergence (lower = more similar output distributions).\n\n### Average KLD to All Other Models\n\n| Model | Avg KLD | Output Tokens | Thinking Tokens |\n|-------|---------|---------------|-----------------|\n");
         for (model, data) in &kld_results.avg_kld_to_others {
-            md.push_str(&format!("| {} | {:.3} |\n", model, data.avg_kld_to_others));
+            md.push_str(&format!(
+                "| {} | {:.3} | {} | {} |\n",
+                model, data.avg_kld_to_others, data.output_tokens, data.thinking_tokens
+            ));
         }
 
         if !kld_results.pairwise.is_empty() {

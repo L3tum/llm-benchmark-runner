@@ -15,6 +15,7 @@ models:
 benchmarks:
   - mmlu_pro
   - kld
+  # - minebench
 
 benchmark:
   mmlu_pro:
@@ -24,6 +25,11 @@ benchmark:
     num_prompts: 50
     prompt_source: mmlu
     # custom_prompts_path: null
+  minebench:
+    # Optional: run several Minebench building prompts
+    buildings: [castle, dragon, train]
+    # Optional legacy/custom single prompt:
+    # build: "A compact test castle"
 
 # Extensible: add custom benchmark sections here
 custom_bench:
