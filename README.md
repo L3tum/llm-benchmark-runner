@@ -1,6 +1,6 @@
 # Model Benchmark Suite
 
-A modular Python benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it. Supports **MMLU-Pro** (auto-downloaded) and **KLD divergence** between models.
+A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it. Supports **MMLU-Pro** (auto-downloaded) and **KLD divergence** between models.
 
 ## Features
 
@@ -8,18 +8,18 @@ A modular Python benchmark suite for evaluating LLM models with **direct model e
 - **MMLU-Pro**: benchmark with up to 10 options per question, CoT few-shot prompting, per-subject accuracy.
 - **KLD**: pairwise Kullback-Leibler divergence between model distributions on shared prompts.
 - **Resumable**: results saved after each model; rerunning skips completed models.
-- **Extensible benchmarks**: add a new benchmark by creating `benchmarks/<name>.py` with a `run_benchmark(model, config)` function.
+- **Extensible benchmarks**: add a new benchmark by creating a module in `src/benchmarks/` and registering it in `src/benchmarks/mod.rs`.
 - **CLI config override**: `--config path/to/config.yaml`.
 
 ## Prerequisites
 
-- **Python 3.10+**
+- **Rust 1.83+** (stable)
 - A GGUF model and a runner (llama-server, ollama, etc.) that exposes an OpenAI-compatible API
 
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+cargo install --path .
 ```
 
 ## Configuration
@@ -58,7 +58,7 @@ Each model is:
 ## Running Benchmarks
 
 ```bash
-python benchmark_runner.py --config models_config.yaml
+cargo run -- run --config models_config.yaml
 ```
 
 The script will:
@@ -75,10 +75,10 @@ Results are saved to `benchmark_results/`:
 
 ## Testing Models (Without Running Benchmarks)
 
-Before running full benchmarks, you can validate that each model's configuration works (start, health, prompt, stop):
+Before running full benchmarks, validate each model's configuration (start, health check, prompt, stop):
 
 ```bash
-python benchmark_runner.py test-models --config models_config.yaml
+cargo run -- test-models --config models_config.yaml
 ```
 
 This command:
@@ -92,15 +92,35 @@ Useful for CI/CD pipelines or quickly verifying config changes without spending 
 
 ## Adding New Benchmarks
 
-1. Create `benchmarks/my_bench.py` with:
-   ```python
-   def run_benchmark(model: dict, config: dict) -> dict:
-       # model: {display_name, cmd, cmdStop, proxy, ...}
-       # config: your benchmark-specific config section
-       return {"my_metric": 0.8}
+1. Create `src/benchmarks/my_bench.rs` with a struct that implements the `Benchmark` trait (see `mmlu_pro.rs` and `kld.rs` for examples):
+   ```rust
+   struct MyBenchmark;
+
+   impl Benchmark for MyBenchmark {
+       type Config = MyBenchmarkConfig;
+       const NAME: &'static str = "my_bench";
+       
+       fn execute(model: &ModelConfig, config: &Self::Config) -> Result<serde_json::Value> {
+           // Run your benchmark logic
+           Ok(serde_json::json!({"my_metric": 0.8}))
+       }
+   }
    ```
-2. Register in `benchmarks/__init__.py`'s `BENCHMARKS` dict
-3. Call it from `benchmark_runner.py` (or add a generic benchmark loop there)
+2. Register the benchmark in `src/benchmarks/mod.rs`:
+   ```rust
+   use my_bench::MyBenchmark;
+   // ...
+   benchmarks.insert(MyBenchmark::NAME.into(), Box::new(MyBenchmark));
+   ```
+3. The `cargo run -- run` command will automatically pick up your new benchmark (if `benchmarks` is not specified in config).
+
+## Generating Reports
+
+Reports are automatically generated after benchmarking. To generate reports from existing results without rerunning benchmarks:
+
+```bash
+cargo run -- report
+```
 
 ## MMLU-Pro Details
 

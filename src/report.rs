@@ -9,7 +9,7 @@ use std::path::Path;
 #[derive(Serialize)]
 struct MmluProResult {
     accuracy: f64,
-    accuracy_pct: String,  // pre-rounded
+    accuracy_pct: String, // pre-rounded
     total_questions: i64,
     results_by_subject: HashMap<String, SubjectResult>,
     best: bool,
@@ -18,7 +18,7 @@ struct MmluProResult {
 #[derive(Serialize)]
 struct SubjectResult {
     acc: f64,
-    acc_pct: String,  // pre-rounded
+    acc_pct: String, // pre-rounded
     corr: i64,
     wrong: i64,
 }
@@ -28,7 +28,7 @@ struct SubjectResult {
 struct KldPairResult {
     models: Vec<String>,
     avg_kld: f64,
-    avg_kld_str: String,  // pre-rounded
+    avg_kld_str: String, // pre-rounded
     num_prompts_evaluated: i64,
 }
 
@@ -36,7 +36,7 @@ struct KldPairResult {
 #[derive(Serialize)]
 struct KldAvgResult {
     avg_kld_to_others: f64,
-    avg_kld_to_others_str: String,  // pre-rounded
+    avg_kld_to_others_str: String, // pre-rounded
     klds: Vec<f64>,
     best: bool,
 }
@@ -59,7 +59,9 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
     let kld_results = convert_kld_results(results);
 
     let summary = generate_summary(&mmlu_pro_results, &kld_results);
-    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    let timestamp = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
 
     let models_evaluated_str = models_evaluated.join(", ");
     // HTML report using askama template
@@ -100,7 +102,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
 #[template(path = "report.html", escape = "html")]
 pub struct ReportTemplate<'a> {
     timestamp: &'a str,
-    models_evaluated: &'a str,  // pre-joined comma-separated
+    models_evaluated: &'a str, // pre-joined comma-separated
     mmlu_pro_results: &'a HashMap<String, MmluProResult>,
     kld_results: &'a HashMap<String, KldPairResult>,
     avg_kld_to_others: &'a HashMap<String, KldAvgResult>,
@@ -121,7 +123,10 @@ fn extract_mmlu_results(results: &serde_json::Value) -> HashMap<String, MmluProR
         for (name, data) in models {
             if let Some(mmlu) = data.get("mmlu_pro").and_then(|v| v.as_object()) {
                 let accuracy = mmlu.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let total_questions = mmlu.get("total_questions").and_then(|v| v.as_i64()).unwrap_or(0);
+                let total_questions = mmlu
+                    .get("total_questions")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
                 let best = best_acc == Some(accuracy);
 
                 // Parse per-subject results
@@ -135,10 +140,25 @@ fn extract_mmlu_results(results: &serde_json::Value) -> HashMap<String, MmluProR
                                     (
                                         cat.clone(),
                                         SubjectResult {
-                                            acc: val_obj.get("acc").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                            acc_pct: format!("{:.2}", val_obj.get("acc").and_then(|v| v.as_f64()).unwrap_or(0.0)),
-                                            corr: val_obj.get("corr").and_then(|v| v.as_i64()).unwrap_or(0),
-                                            wrong: val_obj.get("wrong").and_then(|v| v.as_i64()).unwrap_or(0),
+                                            acc: val_obj
+                                                .get("acc")
+                                                .and_then(|v| v.as_f64())
+                                                .unwrap_or(0.0),
+                                            acc_pct: format!(
+                                                "{:.2}",
+                                                val_obj
+                                                    .get("acc")
+                                                    .and_then(|v| v.as_f64())
+                                                    .unwrap_or(0.0)
+                                            ),
+                                            corr: val_obj
+                                                .get("corr")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                            wrong: val_obj
+                                                .get("wrong")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
                                         },
                                     )
                                 })
@@ -170,7 +190,10 @@ fn convert_kld_results(results: &serde_json::Value) -> KldResults {
 
     if let Some(kld_pairwise) = results.get("kld_pairwise").and_then(|v| v.as_object()) {
         // Handle avg_kld_to_others
-        if let Some(avg_map) = kld_pairwise.get("avg_kld_to_others").and_then(|v| v.as_object()) {
+        if let Some(avg_map) = kld_pairwise
+            .get("avg_kld_to_others")
+            .and_then(|v| v.as_object())
+        {
             // Find the model with lowest avg KLD
             let best_avg = avg_map
                 .values()
@@ -183,10 +206,7 @@ fn convert_kld_results(results: &serde_json::Value) -> KldResults {
                     val.get("klds").and_then(|v| v.as_array()),
                 ) {
                     let best = best_avg == Some(avg);
-                    let klds_vec: Vec<f64> = klds
-                        .iter()
-                        .filter_map(|v| v.as_f64())
-                        .collect();
+                    let klds_vec: Vec<f64> = klds.iter().filter_map(|v| v.as_f64()).collect();
                     avg_kld_to_others.insert(
                         name.clone(),
                         KldAvgResult {
@@ -241,20 +261,38 @@ fn generate_summary(
 
     if let Some((model, data)) = mmlu_pro_results
         .iter()
-        .max_by(|(_a, a_data), (_b, b_data)| a_data.accuracy.partial_cmp(&b_data.accuracy).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|(_a, a_data), (_b, b_data)| {
+            a_data
+                .accuracy
+                .partial_cmp(&b_data.accuracy)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     {
-        summary.push(format!("Highest MMLU-Pro accuracy: {} ({:.1}%)", model, data.accuracy * 100.0));
+        summary.push(format!(
+            "Highest MMLU-Pro accuracy: {} ({:.1}%)",
+            model,
+            data.accuracy * 100.0
+        ));
     }
 
     // KLD summary
-    if let Some((model, data)) = kld_results
-        .avg_kld_to_others
-        .iter()
-        .min_by(|(_a, a_data), (_b, b_data)| a_data.avg_kld_to_others.partial_cmp(&b_data.avg_kld_to_others).unwrap_or(std::cmp::Ordering::Equal))
+    if let Some((model, data)) =
+        kld_results
+            .avg_kld_to_others
+            .iter()
+            .min_by(|(_a, a_data), (_b, b_data)| {
+                a_data
+                    .avg_kld_to_others
+                    .partial_cmp(&b_data.avg_kld_to_others)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     {
-        summary.push(format!("Lowest avg KLD to others: {} ({:.3})", model, data.avg_kld_to_others));
+        summary.push(format!(
+            "Lowest avg KLD to others: {} ({:.3})",
+            model, data.avg_kld_to_others
+        ));
     }
-    for (_key, data) in &kld_results.pairwise {
+    for data in kld_results.pairwise.values() {
         summary.push(format!(
             "KLD {} vs {}: {:.3} ({} prompts)",
             data.models[0], data.models[1], data.avg_kld, data.num_prompts_evaluated
@@ -278,7 +316,12 @@ fn generate_markdown_report(
 
     md.push_str("\n## MMLU-Pro Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions |\n|-------|-----------------|-----------------|\n");
     for (model, data) in mmlu_pro_results {
-        md.push_str(&format!("| {} | {:.1}% | {} |\n", model, data.accuracy * 100.0, data.total_questions));
+        md.push_str(&format!(
+            "| {} | {:.1}% | {} |\n",
+            model,
+            data.accuracy * 100.0,
+            data.total_questions
+        ));
     }
 
     md.push_str("\n### Per-Subject Breakdown\n\n| Model | Subject | Accuracy | Correct | Wrong |\n|-------|---------|----------|---------|------|\n");
@@ -286,7 +329,11 @@ fn generate_markdown_report(
         for (subject, sdata) in &data.results_by_subject {
             md.push_str(&format!(
                 "| {} | {} | {:.1}% | {} | {} |\n",
-                model, subject, sdata.acc * 100.0, sdata.corr, sdata.wrong
+                model,
+                subject,
+                sdata.acc * 100.0,
+                sdata.corr,
+                sdata.wrong
             ));
         }
     }
@@ -299,7 +346,7 @@ fn generate_markdown_report(
     }
 
     md.push_str("\n### Pairwise KLD\n\n| Model A | Model B | Average KLD | Samples |\n|---------|---------|-------------|---------|\n");
-    for (_key, data) in &kld_results.pairwise {
+    for data in kld_results.pairwise.values() {
         md.push_str(&format!(
             "| {} | {} | {:.3} | {} |\n",
             data.models[0], data.models[1], data.avg_kld, data.num_prompts_evaluated

@@ -74,7 +74,8 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     if let Some(ref existing) = existing_results {
         if let Some(models) = existing.get("models").and_then(|v| v.as_object()) {
             for (name, data) in models {
-                if let Some(completed) = data.get("benchmarks_completed").and_then(|v| v.as_array()) {
+                if let Some(completed) = data.get("benchmarks_completed").and_then(|v| v.as_array())
+                {
                     let bench_names: Vec<String> = completed
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -190,6 +191,11 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
 }
 
 fn test_models(config_path: &str) -> Result<()> {
+    // NOTE: Early termination (Ctrl+C) may leave models running.
+    // To handle this robustly, integrate a signal handler (e.g., ctrlc) to
+    // stop all running processes. This is consistent with the existing
+    // `run_model` behavior. Future improvement: add SIGINT handling here.
+
     println!("Loading config: {}", config_path);
     let config = config::load_config(config_path)?;
     if config.models.is_empty() {
@@ -204,7 +210,11 @@ fn test_models(config_path: &str) -> Result<()> {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("  FAIL: Failed to start model: {}", e);
-                results.push((model.display_name.clone(), false, format!("start error: {}", e)));
+                results.push((
+                    model.display_name.clone(),
+                    false,
+                    format!("start error: {}", e),
+                ));
                 continue;
             }
         };
@@ -214,7 +224,11 @@ fn test_models(config_path: &str) -> Result<()> {
             Err(e) => {
                 runner::stop_model(&model.cmd_stop, process);
                 eprintln!("  FAIL: Failed to create client: {}", e);
-                results.push((model.display_name.clone(), false, format!("client error: {}", e)));
+                results.push((
+                    model.display_name.clone(),
+                    false,
+                    format!("client error: {}", e),
+                ));
                 continue;
             }
         };
@@ -222,7 +236,11 @@ fn test_models(config_path: &str) -> Result<()> {
         if !runner::wait_for_health(&client) {
             runner::stop_model(&model.cmd_stop, process);
             eprintln!("  FAIL: Model proxy did not become healthy");
-            results.push((model.display_name.clone(), false, "proxy not healthy".to_string()));
+            results.push((
+                model.display_name.clone(),
+                false,
+                "proxy not healthy".to_string(),
+            ));
             continue;
         }
         println!("  Proxy healthy.");
@@ -240,7 +258,11 @@ fn test_models(config_path: &str) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("  FAIL: Chat completion failed: {}", e);
-                results.push((model.display_name.clone(), false, format!("chat error: {}", e)));
+                results.push((
+                    model.display_name.clone(),
+                    false,
+                    format!("chat error: {}", e),
+                ));
             }
         }
 
@@ -252,14 +274,25 @@ fn test_models(config_path: &str) -> Result<()> {
     println!("\n=== Test Summary ===");
     for (name, success, msg) in &results {
         if *success {
-            println!("  [PASS] {}", name);
+            // Truncate the response snippet to keep the summary readable
+            let truncated_msg = if msg.len() > 50 {
+                format!("{}...", &msg[..47])
+            } else {
+                msg.clone()
+            };
+            println!("  [PASS] {} - {}", name, truncated_msg);
         } else {
             println!("  [FAIL] {} - {}", name, msg);
         }
     }
     let pass_count = results.iter().filter(|(_, s, _)| *s).count();
     let fail_count = results.iter().filter(|(_, s, _)| !*s).count();
-    println!("  Total: {} tests, {} passed, {} failed", results.len(), pass_count, fail_count);
+    println!(
+        "  Total: {} tests, {} passed, {} failed",
+        results.len(),
+        pass_count,
+        fail_count
+    );
 
     if fail_count > 0 {
         Err(anyhow::anyhow!("Some model tests failed"))

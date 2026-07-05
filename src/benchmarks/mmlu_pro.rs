@@ -48,19 +48,12 @@ impl MmluProBenchmark {
     fn group_by_category(items: Vec<MmluItem>) -> HashMap<String, Vec<MmluItem>> {
         let mut groups: HashMap<String, Vec<MmluItem>> = HashMap::new();
         for item in items {
-            let options: Vec<String> = item
-                .options
-                .into_iter()
-                .filter(|o| o != "N/A")
-                .collect();
+            let options: Vec<String> = item.options.into_iter().filter(|o| o != "N/A").collect();
             let category = item.category.clone();
             groups
                 .entry(category)
                 .or_default()
-                .push(MmluItem {
-                    options,
-                    ..item
-                });
+                .push(MmluItem { options, ..item });
         }
         groups
     }
@@ -83,7 +76,13 @@ impl super::Benchmark for MmluProBenchmark {
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
         let subjects_filter = config.get("subjects");
         let subjects: Option<Vec<String>> = match subjects_filter {
-            Some(s) if s.is_string() => Some(s.as_str().unwrap().split(',').map(|s| s.trim().to_string()).collect()),
+            Some(s) if s.is_string() => Some(
+                s.as_str()
+                    .unwrap()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect(),
+            ),
             Some(s) if s.is_null() => None,
             _ => None,
         };
@@ -108,7 +107,9 @@ impl super::Benchmark for MmluProBenchmark {
                 .ok_or_else(|| anyhow::anyhow!("Category {} not found", category))?
                 .clone();
             let test_questions = match num_samples {
-                Some(n) if test_questions.len() > n as usize => test_questions[..n as usize].to_vec(),
+                Some(n) if test_questions.len() > n as usize => {
+                    test_questions[..n as usize].to_vec()
+                }
                 _ => test_questions,
             };
 
@@ -118,7 +119,11 @@ impl super::Benchmark for MmluProBenchmark {
                 .map(|items| items.iter().take(5).collect())
                 .unwrap_or_default();
 
-            println!("\nEvaluating {}: {} questions", category, test_questions.len());
+            println!(
+                "\nEvaluating {}: {} questions",
+                category,
+                test_questions.len()
+            );
 
             let mut category_correct = 0usize;
             let mut category_total = 0usize;
@@ -135,17 +140,24 @@ impl super::Benchmark for MmluProBenchmark {
                 for ex in &cot_examples {
                     prompt.push_str(&format!("Question: {}\nOptions: ", ex.question));
                     for (i, opt) in ex.options.iter().enumerate() {
-                        prompt.push_str(&format!("{}: {}\n", &choice_map[i..i+1], opt));
+                        prompt.push_str(&format!("{}: {}\n", &choice_map[i..i + 1], opt));
                     }
-                    let cot = ex.cot_content.as_deref().unwrap_or("Let's think step by step.");
-                    let cot_clean = if cot.starts_with("A: ") { &cot[3..] } else { cot };
+                    let cot = ex
+                        .cot_content
+                        .as_deref()
+                        .unwrap_or("Let's think step by step.");
+                    let cot_clean = if let Some(stripped) = cot.strip_prefix("A: ") {
+                        stripped
+                    } else {
+                        cot
+                    };
                     prompt.push_str(&format!("Answer: {}\n\n", cot_clean));
                 }
 
                 // Current question
                 prompt.push_str(&format!("Question: {}\nOptions: ", question_text));
                 for (i, opt) in q.options.iter().enumerate() {
-                    prompt.push_str(&format!("{}: {}\n", &choice_map[i..i+1], opt));
+                    prompt.push_str(&format!("{}: {}\n", &choice_map[i..i + 1], opt));
                 }
                 prompt.push_str("Answer: ");
 
@@ -170,12 +182,22 @@ impl super::Benchmark for MmluProBenchmark {
             let mut record = serde_json::Map::new();
             record.insert("acc".to_string(), serde_json::json!(accuracy));
             record.insert("corr".to_string(), serde_json::json!(category_correct));
-            record.insert("wrong".to_string(), serde_json::json!(category_total - category_correct));
-            let _: Option<serde_json::Value> = category_record.insert(category.clone(), serde_json::Value::Object(record));
+            record.insert(
+                "wrong".to_string(),
+                serde_json::json!(category_total - category_correct),
+            );
+            let _: Option<serde_json::Value> =
+                category_record.insert(category.clone(), serde_json::Value::Object(record));
         }
 
-        let total_correct: i64 = category_record.values().map(|r| r["corr"].as_i64().unwrap_or(0)).sum();
-        let total_wrong: i64 = category_record.values().map(|r| r["wrong"].as_i64().unwrap_or(0)).sum();
+        let total_correct: i64 = category_record
+            .values()
+            .map(|r| r["corr"].as_i64().unwrap_or(0))
+            .sum();
+        let total_wrong: i64 = category_record
+            .values()
+            .map(|r| r["wrong"].as_i64().unwrap_or(0))
+            .sum();
         let overall_accuracy = if total_correct + total_wrong > 0 {
             total_correct as f64 / (total_correct + total_wrong) as f64
         } else {
@@ -208,14 +230,21 @@ fn extract_answer(text: &str) -> Option<char> {
         }
     }
 
-    // Final: last single letter from A-J
-    let re3 = Regex::new(r"\b([A-J])\b(?![\s]*[,;:]\s*\b[A-J]\b)").ok()?;
-    let last = re3.captures_iter(text).last();
-    if let Some(caps) = last {
-        if let Some(m) = caps.get(1) {
-            return m.as_str().chars().next();
+    // Final: last single letter from A-J, excluding those followed by comma/semicolon and another letter (e.g., "A, B")
+    let re_letter = Regex::new(r"\b([A-J])\b").ok()?;
+    let re_sequence = Regex::new(r"[A-J][\s]*[,;:]\s*[A-J]").ok()?;
+    let mut last_letter = None;
+    for caps in re_letter.captures_iter(text) {
+        if let Some(letter_match) = caps.get(1) {
+            let letter_start = letter_match.start();
+            // Check if this letter is part of a sequence pattern (e.g., "A, B")
+            let context = &text[letter_start..text.len().min(letter_start + 6)];
+            if re_sequence.find(context).is_some() {
+                // This letter is part of a sequence, skip it
+                continue;
+            }
+            last_letter = letter_match.as_str().chars().next();
         }
     }
-
-    None
+    last_letter
 }

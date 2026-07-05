@@ -32,12 +32,12 @@ fn compute_kl_from_logprobs(logprobs_a: &[LogprobEntry], logprobs_b: &[LogprobEn
     // Convert to probability distributions over common tokens
     fn logprobs_to_dist(lp: &[LogprobEntry]) -> HashMap<&str, f64> {
         let mut dist: HashMap<&str, f64> = HashMap::new();
-        let max_logprob = lp.iter().map(|e| e.logprob).fold(f64::NEG_INFINITY, f64::max);
+        let max_logprob = lp
+            .iter()
+            .map(|e| e.logprob)
+            .fold(f64::NEG_INFINITY, f64::max);
         for entry in lp {
-            dist.insert(
-                &entry.token,
-                (entry.logprob - max_logprob).exp(),
-            );
+            dist.insert(&entry.token, (entry.logprob - max_logprob).exp());
         }
         let total: f64 = dist.values().sum();
         if total == 0.0 {
@@ -122,7 +122,11 @@ impl super::Benchmark for KldBenchmark {
         let mut failed = 0;
 
         for prompt in &prompts {
-            match client.chat_completion_logprobs(&model.model_name, "You are a helpful assistant.", prompt) {
+            match client.chat_completion_logprobs(
+                &model.model_name,
+                "You are a helpful assistant.",
+                prompt,
+            ) {
                 Ok(logprobs) => {
                     model_logprobs.push(logprobs);
                 }
@@ -169,7 +173,7 @@ impl super::Benchmark for KldBenchmark {
                                     (token.as_str(), logprob.as_f64())
                                 {
                                     logprobs.push(LogprobEntry {
-                    token: token.to_string(),
+                                        token: token.to_string(),
                                         logprob,
                                     });
                                 }
@@ -210,8 +214,7 @@ impl super::Benchmark for KldBenchmark {
                             "kld_values": kld_values,
                         }),
                     );
-                    kld_pairs
-                        .insert((a_name.as_str(), b_name.as_str()), kld_values.clone());
+                    kld_pairs.insert((a_name.as_str(), b_name.as_str()), kld_values.clone());
                     kld_pairs.insert((b_name.as_str(), a_name.as_str()), kld_values);
                 }
             }
@@ -241,7 +244,10 @@ impl super::Benchmark for KldBenchmark {
                 );
             }
         }
-        pairwise.insert("avg_kld_to_others".to_string(), serde_json::Value::Object(avg_kld_to_others));
+        pairwise.insert(
+            "avg_kld_to_others".to_string(),
+            serde_json::Value::Object(avg_kld_to_others),
+        );
         Ok(serde_json::json!(pairwise))
     }
 }

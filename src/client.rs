@@ -70,7 +70,12 @@ impl Client {
         }
         Ok(response.choices[0].message.content.clone())
     }
-    pub fn chat_completion_logprobs(&self, model_name: &str, system: &str, user: &str) -> Result<Vec<LogprobEntry>> {
+    pub fn chat_completion_logprobs(
+        &self,
+        model_name: &str,
+        system: &str,
+        user: &str,
+    ) -> Result<Vec<LogprobEntry>> {
         let url = self.base_url.join("chat/completions")?;
         let req = serde_json::json!({
             "model": model_name,
