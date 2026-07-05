@@ -3,7 +3,10 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+pub mod aime;
+pub mod gpqa;
 pub mod kld;
+pub mod math500;
 pub mod mmlu_pro;
 
 /// Trait for all benchmarks.
@@ -33,6 +36,18 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "kld".to_string(),
             Box::new(kld::KldBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "gpqa".to_string(),
+            Box::new(gpqa::GpqaBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "aime".to_string(),
+            Box::new(aime::AimeBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "math500".to_string(),
+            Box::new(math500::Math500Benchmark) as Box<dyn Benchmark>,
         );
         map
     })

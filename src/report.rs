@@ -15,6 +15,36 @@ struct MmluProResult {
     best: bool,
 }
 
+/// Strongly-typed GPQA Diamond result (per-category accuracy)
+#[derive(Serialize)]
+struct GpqaResult {
+    accuracy: f64,
+    accuracy_pct: String,
+    total_questions: i64,
+    results_by_subject: HashMap<String, SubjectResult>,
+    best: bool,
+}
+
+/// Strongly-typed AIME result (overall count correct)
+#[derive(Serialize)]
+struct AimeResult {
+    accuracy: f64,
+    accuracy_pct: String,
+    total_questions: i64,
+    correct: i64,
+    best: bool,
+}
+
+/// Strongly-typed MATH-500 result (per-subject accuracy)
+#[derive(Serialize)]
+struct Math500Result {
+    accuracy: f64,
+    accuracy_pct: String,
+    total_questions: i64,
+    results_by_subject: HashMap<String, SubjectResult>,
+    best: bool,
+}
+
 #[derive(Serialize)]
 struct SubjectResult {
     acc: f64,
@@ -56,9 +86,18 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         .unwrap_or_default();
 
     let mmlu_pro_results = extract_mmlu_results(results);
+    let gpqa_results = extract_gpqa_results(results);
+    let aime_results = extract_aime_results(results);
+    let math500_results = extract_math500_results(results);
     let kld_results = convert_kld_results(results);
 
-    let summary = generate_summary(&mmlu_pro_results, &kld_results);
+    let summary = generate_summary(
+        &mmlu_pro_results,
+        &gpqa_results,
+        &aime_results,
+        &math500_results,
+        &kld_results,
+    );
     let timestamp = chrono::Utc::now()
         .format("%Y-%m-%d %H:%M:%S UTC")
         .to_string();
@@ -69,6 +108,9 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         timestamp: &timestamp,
         models_evaluated: &models_evaluated_str,
         mmlu_pro_results: &mmlu_pro_results,
+        gpqa_results: &gpqa_results,
+        aime_results: &aime_results,
+        math500_results: &math500_results,
         kld_results: &kld_results.pairwise,
         avg_kld_to_others: &kld_results.avg_kld_to_others,
         summary: &summary,
@@ -84,6 +126,9 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         &timestamp,
         &models_evaluated,
         &mmlu_pro_results,
+        &gpqa_results,
+        &aime_results,
+        &math500_results,
         &kld_results,
         &summary,
     );
@@ -104,6 +149,9 @@ pub struct ReportTemplate<'a> {
     timestamp: &'a str,
     models_evaluated: &'a str, // pre-joined comma-separated
     mmlu_pro_results: &'a HashMap<String, MmluProResult>,
+    gpqa_results: &'a HashMap<String, GpqaResult>,
+    aime_results: &'a HashMap<String, AimeResult>,
+    math500_results: &'a HashMap<String, Math500Result>,
     kld_results: &'a HashMap<String, KldPairResult>,
     avg_kld_to_others: &'a HashMap<String, KldAvgResult>,
     summary: &'a Vec<String>,
@@ -171,6 +219,189 @@ fn extract_mmlu_results(results: &serde_json::Value) -> HashMap<String, MmluProR
                 map.insert(
                     name.clone(),
                     MmluProResult {
+                        accuracy,
+                        accuracy_pct,
+                        total_questions,
+                        results_by_subject,
+                        best,
+                    },
+                );
+            }
+        }
+    }
+    map
+}
+
+fn extract_gpqa_results(results: &serde_json::Value) -> HashMap<String, GpqaResult> {
+    let mut map = HashMap::new();
+    let models = results.get("models").and_then(|v| v.as_object());
+    if let Some(models) = models {
+        let best_acc = models
+            .values()
+            .filter_map(|data| data.get("gpqa"))
+            .filter_map(|gpqa| gpqa.get("accuracy").and_then(|v| v.as_f64()))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (name, data) in models {
+            if let Some(gpqa) = data.get("gpqa").and_then(|v| v.as_object()) {
+                let accuracy = gpqa.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let total_questions = gpqa
+                    .get("total_questions")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let best = best_acc == Some(accuracy);
+
+                let results_by_subject: HashMap<String, SubjectResult> = gpqa
+                    .get("results_by_subject")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter()
+                            .filter_map(|(cat, val)| {
+                                val.as_object().map(|val_obj| {
+                                    (
+                                        cat.clone(),
+                                        SubjectResult {
+                                            acc: val_obj
+                                                .get("acc")
+                                                .and_then(|v| v.as_f64())
+                                                .unwrap_or(0.0),
+                                            acc_pct: format!(
+                                                "{:.2}",
+                                                val_obj
+                                                    .get("acc")
+                                                    .and_then(|v| v.as_f64())
+                                                    .unwrap_or(0.0)
+                                            ),
+                                            corr: val_obj
+                                                .get("corr")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                            wrong: val_obj
+                                                .get("wrong")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                        },
+                                    )
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let accuracy_pct = format!("{:.2}", accuracy);
+                map.insert(
+                    name.clone(),
+                    GpqaResult {
+                        accuracy,
+                        accuracy_pct,
+                        total_questions,
+                        results_by_subject,
+                        best,
+                    },
+                );
+            }
+        }
+    }
+    map
+}
+
+fn extract_aime_results(results: &serde_json::Value) -> HashMap<String, AimeResult> {
+    let mut map = HashMap::new();
+    let models = results.get("models").and_then(|v| v.as_object());
+    if let Some(models) = models {
+        let best_acc = models
+            .values()
+            .filter_map(|data| data.get("aime"))
+            .filter_map(|aime| aime.get("accuracy").and_then(|v| v.as_f64()))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (name, data) in models {
+            if let Some(aime) = data.get("aime").and_then(|v| v.as_object()) {
+                let accuracy = aime.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let total_questions = aime
+                    .get("total_questions")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let correct = aime.get("correct").and_then(|v| v.as_i64()).unwrap_or(0);
+                let best = best_acc == Some(accuracy);
+                let accuracy_pct = format!("{:.2}", accuracy);
+
+                map.insert(
+                    name.clone(),
+                    AimeResult {
+                        accuracy,
+                        accuracy_pct,
+                        total_questions,
+                        correct,
+                        best,
+                    },
+                );
+            }
+        }
+    }
+    map
+}
+
+fn extract_math500_results(results: &serde_json::Value) -> HashMap<String, Math500Result> {
+    let mut map = HashMap::new();
+    let models = results.get("models").and_then(|v| v.as_object());
+    if let Some(models) = models {
+        let best_acc = models
+            .values()
+            .filter_map(|data| data.get("math500"))
+            .filter_map(|math| math.get("accuracy").and_then(|v| v.as_f64()))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (name, data) in models {
+            if let Some(math) = data.get("math500").and_then(|v| v.as_object()) {
+                let accuracy = math.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let total_questions = math
+                    .get("total_questions")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let best = best_acc == Some(accuracy);
+
+                let results_by_subject: HashMap<String, SubjectResult> = math
+                    .get("results_by_subject")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter()
+                            .filter_map(|(cat, val)| {
+                                val.as_object().map(|val_obj| {
+                                    (
+                                        cat.clone(),
+                                        SubjectResult {
+                                            acc: val_obj
+                                                .get("acc")
+                                                .and_then(|v| v.as_f64())
+                                                .unwrap_or(0.0),
+                                            acc_pct: format!(
+                                                "{:.2}",
+                                                val_obj
+                                                    .get("acc")
+                                                    .and_then(|v| v.as_f64())
+                                                    .unwrap_or(0.0)
+                                            ),
+                                            corr: val_obj
+                                                .get("corr")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                            wrong: val_obj
+                                                .get("wrong")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                        },
+                                    )
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let accuracy_pct = format!("{:.2}", accuracy);
+                map.insert(
+                    name.clone(),
+                    Math500Result {
                         accuracy,
                         accuracy_pct,
                         total_questions,
@@ -255,6 +486,9 @@ fn convert_kld_results(results: &serde_json::Value) -> KldResults {
 
 fn generate_summary(
     mmlu_pro_results: &HashMap<String, MmluProResult>,
+    gpqa_results: &HashMap<String, GpqaResult>,
+    aime_results: &HashMap<String, AimeResult>,
+    math500_results: &HashMap<String, Math500Result>,
     kld_results: &KldResults,
 ) -> Vec<String> {
     let mut summary = Vec::new();
@@ -270,6 +504,45 @@ fn generate_summary(
     {
         summary.push(format!(
             "Highest MMLU-Pro accuracy: {} ({:.1}%)",
+            model,
+            data.accuracy * 100.0
+        ));
+    }
+
+    if let Some((model, data)) = gpqa_results.iter().max_by(|(_a, a_data), (_b, b_data)| {
+        a_data
+            .accuracy
+            .partial_cmp(&b_data.accuracy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
+        summary.push(format!(
+            "Highest GPQA Diamond accuracy: {} ({:.1}%)",
+            model,
+            data.accuracy * 100.0
+        ));
+    }
+
+    if let Some((model, data)) = aime_results.iter().max_by(|(_a, a_data), (_b, b_data)| {
+        a_data
+            .accuracy
+            .partial_cmp(&b_data.accuracy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
+        summary.push(format!(
+            "Highest AIME 2025 accuracy: {} ({:.1}%)",
+            model,
+            data.accuracy * 100.0
+        ));
+    }
+
+    if let Some((model, data)) = math500_results.iter().max_by(|(_a, a_data), (_b, b_data)| {
+        a_data
+            .accuracy
+            .partial_cmp(&b_data.accuracy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
+        summary.push(format!(
+            "Highest MATH-500 accuracy: {} ({:.1}%)",
             model,
             data.accuracy * 100.0
         ));
@@ -301,10 +574,14 @@ fn generate_summary(
     summary
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_markdown_report(
     timestamp: &str,
     models_evaluated: &[String],
     mmlu_pro_results: &HashMap<String, MmluProResult>,
+    gpqa_results: &HashMap<String, GpqaResult>,
+    aime_results: &HashMap<String, AimeResult>,
+    math500_results: &HashMap<String, Math500Result>,
     kld_results: &KldResults,
     summary: &[String],
 ) -> String {
@@ -314,6 +591,7 @@ fn generate_markdown_report(
         models_evaluated.join(", ")
     );
 
+    // MMLU-Pro
     md.push_str("\n## MMLU-Pro Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions |\n|-------|-----------------|-----------------|\n");
     for (model, data) in mmlu_pro_results {
         md.push_str(&format!(
@@ -338,19 +616,90 @@ fn generate_markdown_report(
         }
     }
 
-    md.push_str(
-        "\n## KLD (Kullback-Leibler Divergence)\n\nAverage KL divergence (lower = more similar output distributions).\n\n### Average KLD to All Other Models\n\n| Model | Avg KLD |\n|-------|---------|\n",
-    );
-    for (model, data) in &kld_results.avg_kld_to_others {
-        md.push_str(&format!("| {} | {:.3} |\n", model, data.avg_kld_to_others));
+    // GPQA Diamond
+    if !gpqa_results.is_empty() {
+        md.push_str("\n## GPQA Diamond Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions |\n|-------|-----------------|-----------------|\n");
+        for (model, data) in gpqa_results {
+            md.push_str(&format!(
+                "| {} | {:.1}% | {} |\n",
+                model,
+                data.accuracy * 100.0,
+                data.total_questions
+            ));
+        }
+
+        md.push_str("\n### Per-Category Breakdown\n\n| Model | Category | Accuracy | Correct | Wrong |\n|-------|----------|----------|---------|------|\n");
+        for (model, data) in gpqa_results {
+            for (category, sdata) in &data.results_by_subject {
+                md.push_str(&format!(
+                    "| {} | {} | {:.1}% | {} | {} |\n",
+                    model,
+                    category,
+                    sdata.acc * 100.0,
+                    sdata.corr,
+                    sdata.wrong
+                ));
+            }
+        }
     }
 
-    md.push_str("\n### Pairwise KLD\n\n| Model A | Model B | Average KLD | Samples |\n|---------|---------|-------------|---------|\n");
-    for data in kld_results.pairwise.values() {
-        md.push_str(&format!(
-            "| {} | {} | {:.3} | {} |\n",
-            data.models[0], data.models[1], data.avg_kld, data.num_prompts_evaluated
-        ));
+    // AIME
+    if !aime_results.is_empty() {
+        md.push_str("\n## AIME 2025 Accuracy (higher is better)\n\n| Model | Accuracy | Total Questions | Correct |\n|-------|----------|-----------------|---------|\n");
+        for (model, data) in aime_results {
+            md.push_str(&format!(
+                "| {} | {:.1}% | {} | {} |\n",
+                model,
+                data.accuracy * 100.0,
+                data.total_questions,
+                data.correct
+            ));
+        }
+    }
+
+    // MATH-500
+    if !math500_results.is_empty() {
+        md.push_str("\n## MATH-500 Accuracy (higher is better)\n\n| Model | Overall Accuracy | Total Questions |\n|-------|-----------------|-----------------|\n");
+        for (model, data) in math500_results {
+            md.push_str(&format!(
+                "| {} | {:.1}% | {} |\n",
+                model,
+                data.accuracy * 100.0,
+                data.total_questions
+            ));
+        }
+
+        md.push_str("\n### Per-Subject Breakdown\n\n| Model | Subject | Accuracy | Correct | Wrong |\n|-------|---------|----------|---------|------|\n");
+        for (model, data) in math500_results {
+            for (subject, sdata) in &data.results_by_subject {
+                md.push_str(&format!(
+                    "| {} | {} | {:.1}% | {} | {} |\n",
+                    model,
+                    subject,
+                    sdata.acc * 100.0,
+                    sdata.corr,
+                    sdata.wrong
+                ));
+            }
+        }
+    }
+
+    // KLD
+    if !kld_results.avg_kld_to_others.is_empty() || !kld_results.pairwise.is_empty() {
+        md.push_str("\n## KLD (Kullback-Leibler Divergence)\n\nAverage KL divergence (lower = more similar output distributions).\n\n### Average KLD to All Other Models\n\n| Model | Avg KLD |\n|-------|---------|\n");
+        for (model, data) in &kld_results.avg_kld_to_others {
+            md.push_str(&format!("| {} | {:.3} |\n", model, data.avg_kld_to_others));
+        }
+
+        if !kld_results.pairwise.is_empty() {
+            md.push_str("\n### Pairwise KLD\n\n| Model A | Model B | Average KLD | Samples |\n|---------|---------|-------------|---------|\n");
+            for data in kld_results.pairwise.values() {
+                md.push_str(&format!(
+                    "| {} | {} | {:.3} | {} |\n",
+                    data.models[0], data.models[1], data.avg_kld, data.num_prompts_evaluated
+                ));
+            }
+        }
     }
 
     md.push_str("\n## Summary\n\n");

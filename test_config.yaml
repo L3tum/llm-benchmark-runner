@@ -7,6 +7,9 @@ models:
 benchmarks:
   - mmlu_pro
   - kld
+  - gpqa
+  - aime
+  - math500
 
 benchmark:
   mmlu_pro:
@@ -15,3 +18,13 @@ benchmark:
   kld:
     num_prompts: 1
     prompt_source: mmlu
+  gpqa:
+    num_samples: 1
+    subjects: "physics"
+    # Requires HF_TOKEN env var for gated dataset download
+  aime:
+    num_samples: 1
+    # year: "2025"  # use "2025" or "2026" to select the AIME dataset (default 2025)
+  math500:
+    num_samples: 1
+    subjects: "algebra"

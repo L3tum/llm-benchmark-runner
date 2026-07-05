@@ -1,12 +1,28 @@
 # Model Benchmark Suite
 
-A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it. Supports **MMLU-Pro** (auto-downloaded) and **KLD divergence** between models.
+A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it. Supports **MMLU-Pro** (auto-downloaded), **GPQA Diamond**, **AIME 2025**, **MATH-500**, and **KLD divergence** between models.
+
+## Quick Start
+
+**GPQA Diamond** (gated dataset) requires a HuggingFace token:
+
+```bash
+export HF_TOKEN="hf_..."
+```
+
+Then configure and run:
+```bash
+cargo run -- run --config models_config.yaml
+```
 
 ## Features
 
 - **Direct execution**: each model starts with a custom `cmd`, benchmarks run against its local OpenAI-compatible proxy, then `cmd_stop` tears it down.
 - **MMLU-Pro**: benchmark with up to 10 options per question, CoT few-shot prompting, per-subject accuracy.
 - **KLD**: pairwise Kullback-Leibler divergence between model distributions on shared prompts.
+- **GPQA Diamond**: 198 graduate-level science questions (biology, chemistry, physics) with zero-shot CoT.
+- **AIME 2025**: 30 competition-level math problems with integer answer extraction.
+- **MATH-500**: 500 math problems across 7 subjects with per-subject accuracy.
 - **Resumable**: results saved after each model; rerunning skips completed models.
 - **Extensible benchmarks**: add a new benchmark by creating a module in `src/benchmarks/` and registering it in `src/benchmarks/mod.rs`.
 - **CLI config override**: `--config path/to/config.yaml` for all commands.
@@ -42,6 +58,9 @@ models:
 benchmarks:
   - mmlu_pro
   - kld
+  - gpqa
+  - aime
+  - math500
 
 benchmark:
   mmlu_pro:
@@ -51,6 +70,15 @@ benchmark:
     num_prompts: 50
     prompt_source: mmlu
     # custom_prompts_path: null
+  gpqa:
+    # num_samples: 10   # use all 198 questions if omitted
+    # subjects: "physics"   # filter by category (comma-separated): biology, chemistry, physics
+    # Note: requires HF_TOKEN environment variable for gated dataset
+  aime:
+    # num_samples: 30   # use all 30 if omitted
+  math500:
+    # num_samples: 50   # use all 500 if omitted
+    # subjects: "algebra"   # filter by subject (comma-separated), null = all subjects
 ```
 
 Each model is:
@@ -141,6 +169,89 @@ The MMLU-Pro benchmark:
 ## KLD Divergence
 
 After each model is benchmarked, its logprobs are collected for the KLD prompts (defaults to MMLU-Pro questions). At the end, pairwise KL divergence is computed between all model pairs. Lower KLD means more similar output distributions.
+
+## 2026 Modern Benchmarks
+
+The suite includes three cutting-edge 2026 LLM evaluation benchmarks:
+
+### GPQA Diamond
+
+Graduate-level science multiple-choice benchmark (198 questions) covering **biology**, **chemistry**, and **physics**. Uses zero-shot chain-of-thought prompting with A-D answer extraction.
+
+**⚠️ HF_TOKEN required**: The GPQA Diamond dataset is gated on HuggingFace. You must set the `HF_TOKEN` environment variable before running this benchmark:
+
+```bash
+export HF_TOKEN="hf_..."
+```
+
+Configuration:
+```yaml
+gpqa:
+  num_samples: 10       # use all 198 questions if omitted
+  subjects: "physics"   # filter by category (comma-separated): biology, chemistry, physics
+```
+
+### AIME (American Invitational Mathematics Examination)
+
+Competition-level math problems with integer answer extraction from `\boxed{}` notation. Answers are 3-digit integers (000–999). Supports **AIME 2025** and **AIME 2026** datasets via the `year` config option.
+
+Datasets from **MathArena** (`MathArena/aime_2025` or `MathArena/aime_2026`), downloaded via the HuggingFace datasets viewer API.
+
+Configuration:
+```yaml
+aime:
+  num_samples: 30       # use all 30 problems if omitted
+  year: "2025"          # "2025" or "2026", default 2025
+```
+
+### MATH-500
+
+500 competition-level math problems across 7 subjects (algebra, geometry, number theory, precalculus, etc.). Zero-shot chain-of-thought with integer answer extraction.
+
+Configuration:
+```yaml
+math500:
+  num_samples: 50      # use all 500 if omitted
+  subjects: "algebra"   # filter by subject (comma-separated), null = all subjects
+```
+
+## Example Full Configuration
+
+```yaml
+models:
+  - display_name: "MyModel Q4"
+    model: "model"
+    cmd: "llama-server -m /path/to/model.Q4.gguf --port 28287"
+    proxy: "http://localhost:28287/v1"
+
+benchmarks:
+  - mmlu_pro
+  - kld
+  - gpqa
+  - aime
+  - math500
+
+benchmark:
+  mmlu_pro:
+    num_samples: 100
+  kld:
+    num_prompts: 50
+    prompt_source: mmlu
+  gpqa:
+    num_samples: 10
+    subjects: "physics"
+  aime:
+    num_samples: 10
+  math500:
+    num_samples: 20
+    subjects: "algebra"
+```
+
+Remember to set `HF_TOKEN` before running if you include GPQA:
+```bash
+export HF_TOKEN="hf_..."
+cargo run -- run --config models_config.yaml
+```
 
 ## License
 

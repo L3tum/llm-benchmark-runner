@@ -67,6 +67,107 @@
     </tbody>
   </table>
 
+  <h2>🔬 GPQA Diamond Accuracy (higher is better)</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in gpqa_results.iter() %}
+      {% set model = entry.0 %}
+      {% set data = entry.1 %}
+      <tr class="{% if data.best %}best{% endif %}">
+        <td>{{ model }}</td>
+        <td>{{ data.accuracy_pct }}%</td>
+        <td>{{ data.total_questions }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Per-Category Breakdown</h3>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Category</th><th>Accuracy</th><th>Correct</th><th>Wrong</th></tr>
+    </thead>
+    <tbody class="subject-breakdown">
+      {% for entry in gpqa_results.iter() %}
+      {% set model = entry.0 %}
+      {% for subject_entry in entry.1.results_by_subject.iter() %}
+      {% set category = subject_entry.0 %}
+      {% set sdata = subject_entry.1 %}
+      <tr>
+        <td>{{ model }}</td>
+        <td>{{ category }}</td>
+        <td>{{ sdata.acc_pct }}%</td>
+        <td>{{ sdata.corr }}</td>
+        <td>{{ sdata.wrong }}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>🧮 AIME 2025 Accuracy (higher is better)</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Accuracy</th><th>Total Questions</th><th>Correct</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in aime_results.iter() %}
+      {% set model = entry.0 %}
+      {% set data = entry.1 %}
+      <tr class="{% if data.best %}best{% endif %}">
+        <td>{{ model }}</td>
+        <td>{{ data.accuracy_pct }}%</td>
+        <td>{{ data.total_questions }}</td>
+        <td>{{ data.correct }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>📐 MATH-500 Accuracy (higher is better)</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Overall Accuracy</th><th>Total Questions</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in math500_results.iter() %}
+      {% set model = entry.0 %}
+      {% set data = entry.1 %}
+      <tr class="{% if data.best %}best{% endif %}">
+        <td>{{ model }}</td>
+        <td>{{ data.accuracy_pct }}%</td>
+        <td>{{ data.total_questions }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Per-Subject Breakdown</h3>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Subject</th><th>Accuracy</th><th>Correct</th><th>Wrong</th></tr>
+    </thead>
+    <tbody class="subject-breakdown">
+      {% for entry in math500_results.iter() %}
+      {% set model = entry.0 %}
+      {% for subject_entry in entry.1.results_by_subject.iter() %}
+      {% set subject = subject_entry.0 %}
+      {% set sdata = subject_entry.1 %}
+      <tr>
+        <td>{{ model }}</td>
+        <td>{{ subject }}</td>
+        <td>{{ sdata.acc_pct }}%</td>
+        <td>{{ sdata.corr }}</td>
+        <td>{{ sdata.wrong }}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+
   <h2>🔁 KLD (Kullback-Leibler Divergence)</h2>
   <p>Average KL divergence between model output distributions (lower = more similar).</p>
 
