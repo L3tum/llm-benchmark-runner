@@ -13,9 +13,9 @@ import sys
 from openai import OpenAI
 from tqdm import tqdm
 
-# Import the MMLU subset fetcher from the benchmark suite
+# Import the MMLU prompt fetcher from the benchmark suite
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from benchmarks.mmlu import fetch_mmlu_subset
+from benchmarks.mmlu_pro import get_mmlu_prompts
 
 
 def main():
@@ -33,15 +33,12 @@ def main():
                         help="Prompt source: 'mmlu' or 'custom' (requires --custom-prompts-path).")
     parser.add_argument("--custom-prompts-path", default=None,
                         help="Path to custom prompts file (JSON/JSONL with 'prompt' field).")
-    parser.add_argument("--subset-path", default=None,
-                        help="Path to a local MMLU subset file (if prompt-source=mmlu).")
     args = parser.parse_args()
 
     # Get prompts
     prompts = []
     if args.prompt_source == "mmlu":
-        questions = fetch_mmlu_subset(args.api_url, args.num_prompts, args.subset_path)
-        prompts = [q['question'] for q in questions[:args.num_prompts]]
+        prompts = get_mmlu_prompts(args.num_prompts)
     elif args.prompt_source == "custom":
         if not args.custom_prompts_path:
             print("Error: --prompt-source custom requires --custom-prompts-path")

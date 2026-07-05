@@ -177,23 +177,54 @@ def format_example(question: str, options: list, cot_content: str = "") -> str:
 
 
 def extract_answer(text: str) -> Optional[str]:
-    """Extract answer from model output (A-J). Only checks the last line."""
-    # Only look at the last line to avoid false positives from reasoning
-    last_line = text.strip().split('\n')[-1] if text else ""
+    """Extract answer from model output (A-J). Scan entire output, use last match."""
+    if not text:
+        return None
 
-    # Primary pattern: answer is (X)
-    match = re.search(r"answer is \(?([A-J])\)?", last_line, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
+    # Primary pattern: answer is (X) — find all matches, use the last one
+    matches = re.findall(r"answer is \(?([A-J])\)?", text, re.IGNORECASE)
+    if matches:
+        return matches[-1].upper()
 
-    # Fallback: answer: X
-    match = re.search(r"[aA]nswer:\s*([A-J])", last_line)
-    if match:
-        return match.group(1).upper()
+    # Fallback: answer: X — find all matches, use the last one
+    matches = re.findall(r"[aA]nswer:\s*([A-J])", text)
+    if matches:
+        return matches[-1].upper()
 
-    # Final: last single letter from A-J (most likely guess)
-    match = re.search(r"\b([A-J])\b(?!\s*[,;:]\s*\b[A-J]\b)", last_line)
-    if match:
-        return match.group(1).upper()
+    # Final: last single letter from A-J (as guess)
+    matches = re.findall(r"\b([A-J])\b(?!\s*[,;:]\s*\b[A-J]\b)", text)
+    if matches:
+        return matches[-1].upper()
 
     return None
+
+
+def get_mmlu_prompts(num_prompts: int) -> list[str]:
+    """Get MMLU-Pro test question strings for use as prompts.
+
+    Args:
+        num_prompts: Number of prompts to return.
+
+    Returns:
+        List of question strings.
+    """
+    dataset = load_dataset("TIGER-Lab/MMLU-Pro")
+    test_df = dataset["test"]
+
+    def preprocess(df):
+        res = {}
+        for item in df:
+            opts = [o for o in item["options"] if o != "N/A"]
+            item["options"] = opts
+            cat = item["category"]
+            if cat not in res:
+                res[cat] = []
+            res[cat].append(item)
+        return res
+
+    test_data = preprocess(test_df)
+
+    prompts = []
+    for category in test_data:
+        prompts.extend(q["question"] for q in test_data[category])
+    return prompts[:num_prompts]

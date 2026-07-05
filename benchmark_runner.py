@@ -17,6 +17,7 @@ import time
 import subprocess
 import signal
 import argparse
+import shlex
 import requests
 import yaml
 from pathlib import Path
@@ -71,20 +72,21 @@ def wait_for_proxy(proxy: str, timeout: int = 60, poll_interval: int = 2):
 
 
 def start_model(cmd: str) -> subprocess.Popen:
-    """Start model via subprocess.Popen (shell=True, new session).
+    """Start model via subprocess.Popen (shell=False, new session).
     Uses preexec_fn=os.setsid on Linux to create a process group.
     """
+    args = shlex.split(cmd)
     try:
         # Linux
-        return subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 preexec_fn=os.setsid)
     except AttributeError:
         # Non-Linux (e.g., Windows), use start_new_session if available
         if hasattr(os, 'setsid'):
-            return subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                     start_new_session=True)
         else:
-            return subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def stop_model(cmd_stop: str, proc: subprocess.Popen):
@@ -93,7 +95,8 @@ def stop_model(cmd_stop: str, proc: subprocess.Popen):
     """
     stopped_cleanly = True
     if cmd_stop:
-        result = subprocess.run(cmd_stop, shell=True, capture_output=True)
+        args = shlex.split(cmd_stop)
+        result = subprocess.run(args, capture_output=True)
         if result.returncode != 0:
             print(f"Warning: cmdStop failed with code {result.returncode}")
             stopped_cleanly = False
@@ -109,12 +112,13 @@ def stop_model(cmd_stop: str, proc: subprocess.Popen):
     # Fallback to SIGKILL if process still running
     if not stopped_cleanly:
         try:
-            os.kill(proc.pid, 0)  # check if process still alive
+            # Use killpg to check the entire process group
+            os.killpg(proc.pid, 0)  # 0 signal checks if group exists
             print("Process still alive, forcing SIGKILL")
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=5)
         except (ProcessLookupError, OSError):
-            pass  # process is dead
+            pass  # process group is dead
         except subprocess.TimeoutExpired:
             print("Warning: SIGKILL didn't terminate process within 5s")
 

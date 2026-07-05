@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 benchmark_results/
+
+
+# Added by cargo
+
+/target
