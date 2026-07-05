@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod report;
 mod runner;
+mod utils;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -71,6 +72,9 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     let mut failed_benchmarks_per_model: HashMap<String, Vec<String>> = HashMap::new();
     let mut all_models_results: HashMap<String, serde_json::Value> = HashMap::new();
 
+    // Global timing map: benchmark name -> durations (across all models)
+    let mut global_timings: HashMap<String, Vec<std::time::Duration>> = HashMap::new();
+
     if let Some(ref existing) = existing_results {
         if let Some(models) = existing.get("models").and_then(|v| v.as_object()) {
             for (name, data) in models {
@@ -108,8 +112,11 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
         }
     }
 
+    let total_models = config.models.len();
+    let run_start = std::time::Instant::now();
+
     // Model loop
-    for model in &config.models {
+    for (model_idx, model) in config.models.iter().enumerate() {
         let model_completed_benchmarks = completed_benchmarks_per_model
             .get(&model.display_name)
             .cloned()
@@ -134,12 +141,65 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             benchmarks.clone()
         };
 
-        let (model_result, new_successful, new_failed) = runner::run_model(
+        let (model_result, new_successful, new_failed, per_bench_timings) = runner::run_model(
             model,
             &benchmarks_to_run,
             &config.benchmark,
             &model_completed_benchmarks,
         )?;
+        // Merge per-model timings into global map
+        for (bench_name, timings) in per_bench_timings {
+            global_timings
+                .entry(bench_name)
+                .or_default()
+                .extend(timings);
+        }
+
+        // Compute ETA: sum of estimated times for all remaining (model, benchmark) pairs
+        // using global average per benchmark (or global overall average)
+        let mut remaining_est: std::time::Duration = std::time::Duration::from_secs(0);
+        let all_durations: Vec<std::time::Duration> =
+            global_timings.values().flatten().cloned().collect();
+        let overall_avg = if all_durations.is_empty() {
+            std::time::Duration::from_secs(0)
+        } else {
+            let sum: std::time::Duration = all_durations.iter().cloned().sum();
+            sum.div_f64(all_durations.len() as f64)
+        };
+
+        // Count remaining (model, benchmark) pairs for future models
+        for future_model in &config.models[model_idx + 1..] {
+            let future_completed = completed_benchmarks_per_model
+                .get(&future_model.display_name)
+                .cloned()
+                .unwrap_or_default();
+            for bench in &benchmarks {
+                if !future_completed.contains(bench) {
+                    let bench_avg = global_timings.get(bench).map(|v| {
+                        let sum: std::time::Duration = v.iter().cloned().sum();
+                        sum.div_f64(v.len() as f64)
+                    });
+                    let est = bench_avg.unwrap_or(overall_avg);
+                    remaining_est += est;
+                }
+            }
+        }
+        let eta_str = if remaining_est.is_zero() {
+            "–".to_string()
+        } else {
+            utils::format_duration(remaining_est)
+        };
+        let total_runtime = run_start.elapsed();
+        let runtime_str = utils::format_duration(total_runtime);
+        println!(
+            "\n  [model {}/{}] {} runtime: {}, ETA remaining: {}",
+            model_idx + 1,
+            total_models,
+            model.display_name,
+            runtime_str,
+            eta_str
+        );
+
         let status = if model_result.as_object().is_some_and(|m| !m.is_empty()) {
             "completed"
         } else {
@@ -166,6 +226,11 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
         );
         save_results(&all_models_results, &serde_json::Map::new(), RESULTS_FILE)?;
     }
+
+    // Total runtime for the entire run
+    let total_runtime = run_start.elapsed();
+    let runtime_str = utils::format_duration(total_runtime);
+    println!("\nTotal runtime: {}", runtime_str);
 
     // Post-execute
     println!("\nPost-execution phase:");

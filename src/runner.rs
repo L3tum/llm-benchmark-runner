@@ -1,18 +1,29 @@
 use crate::benchmarks;
 use crate::client::Client;
 use crate::config::Model;
+use crate::utils::format_duration;
 use anyhow::Result;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Returns (model_results_json, successful_benchmarks, failed_benchmarks, per_bench_timings)
+/// per_bench_timings: HashMap<benchmark_name, Vec<Duration>> for this model's run
+// ponytail: suppress type_complexity, tuple return is shortest code
+#[allow(clippy::type_complexity)]
 pub fn run_model(
     model: &Model,
     benchmarks: &[String],
     benchmark_config: &HashMap<String, serde_yaml::Value>,
     completed_benchmarks: &[String],
-) -> Result<(serde_json::Value, Vec<String>, Vec<String>)> {
+) -> Result<(
+    serde_json::Value,
+    Vec<String>,
+    Vec<String>,
+    HashMap<String, Vec<Duration>>,
+)> {
     println!("\n  Starting model: {}", model.display_name);
     let process = start_model(&model.cmd)?;
 
@@ -25,8 +36,14 @@ pub fn run_model(
     let mut model_results: HashMap<String, serde_json::Value> = HashMap::new();
     let mut new_successful = completed_benchmarks.to_vec();
     let mut new_failed = Vec::new();
+    let mut per_bench_timings: HashMap<String, Vec<Duration>> = HashMap::new();
 
-    for bench_name in benchmarks {
+    let total_benchmarks = benchmarks.len();
+    let mut completed_count = 0;
+
+    for (idx, bench_name) in benchmarks.iter().enumerate() {
+        let bench_start = Instant::now();
+
         let bench_cfg = benchmark_config
             .get(bench_name)
             .cloned()
@@ -45,12 +62,52 @@ pub fn run_model(
                 new_failed.push(bench_name.to_string());
             }
         }
+        let bench_duration = bench_start.elapsed();
+
+        // Record timing
+        per_bench_timings
+            .entry(bench_name.clone())
+            .or_default()
+            .push(bench_duration);
+        completed_count += 1;
+
+        // Local ETA based on this model's own timings so far
+        let remaining_benchmarks = total_benchmarks - completed_count;
+        if remaining_benchmarks > 0 {
+            let avg = per_bench_timings
+                .values()
+                .flat_map(|v| v.iter())
+                .copied()
+                .collect::<Vec<_>>();
+            let eta_str = if avg.is_empty() {
+                "–".to_string()
+            } else {
+                let total_so_far: Duration = avg.iter().cloned().sum();
+                let mean = total_so_far.div_f64(avg.len() as f64);
+                let eta = mean.mul_f64(remaining_benchmarks as f64);
+                format_duration(eta)
+            };
+            let runtime = format_duration(bench_duration);
+            println!(
+                "  [benchmark {}/{}] {} runtime: {}, ETA: {}",
+                idx + 1,
+                total_benchmarks,
+                bench_name,
+                runtime,
+                eta_str
+            );
+        }
     }
 
     println!("  Stopping model: {}", model.display_name);
     stop_model(&model.cmd_stop, process);
 
-    Ok((serde_json::json!(model_results), new_successful, new_failed))
+    Ok((
+        serde_json::json!(model_results),
+        new_successful,
+        new_failed,
+        per_bench_timings,
+    ))
 }
 #[cfg(unix)]
 pub fn start_model(cmd: &str) -> Result<Child> {
