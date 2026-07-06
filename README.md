@@ -168,7 +168,33 @@ Reports are automatically generated after benchmarking. To generate reports from
 cargo run -- report
 ```
 
-Additional options: `--results` (path to results JSON, default: `benchmark_results/results.json`) and `--output` (output directory, default: `benchmark_results`).
+Additional options: `--results` (path to results JSON, default: `benchmark_results/results.json`) and `--output` (output directory, default: `benchmark_results`). You can also specify `--config` to use comparison definitions from your YAML config (default: `models_config.yaml`).
+
+### Comparison Reports
+
+Define a `comparisons` section in your config YAML to automatically generate filtered HTML reports for specific model groups:
+
+```yaml
+comparisons:
+  - title: "Q4 vs Q5"
+    models:
+      - "MyModel Q4"
+      - "MyModel Q5"
+  - title: "All Models"
+    models:
+      - "MyModel Q4"
+      - "MyModel Q5"
+```
+
+After a benchmark run or a `report` command, comparison reports are generated alongside the main report. The file names are slugified from the title (e.g., "Q4 vs Q5" → `q4-vs-q5.html`). Each comparison report contains only the models from that group, with full benchmark tables, per-subject breakdowns, and KLD analysis.
+
+You can also regenerate only the comparison reports using the `compare` command:
+
+```bash
+cargo run -- compare --config models_config.yaml
+```
+
+This is useful when you want to update comparison reports without regenerating the main report.
 
 ## Adding New Benchmarks
 

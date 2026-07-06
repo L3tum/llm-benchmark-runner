@@ -79,6 +79,15 @@ benchmark:
       humaneval_plus: ~
     num_samples: 10
 
+# Comparison groups for generating filtered reports.
+# Each comparison produces a standalone benchmark_report.html file containing only the listed models.
+# File names are slugified from the title (e.g., "Q4 vs Q5" → "q4-vs-q5.html").
+comparisons:
+  - title: "Q4 vs Q5"
+    models:
+      - "MyModel Q4"
+      - "MyModel Q5"
+
 # Extensible: add custom benchmark sections here
 custom_bench:
   key: "value"

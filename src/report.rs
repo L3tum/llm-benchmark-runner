@@ -1,3 +1,4 @@
+use crate::config::Comparison;
 use anyhow::Result;
 use askama::Template;
 use serde::Serialize;
@@ -155,7 +156,107 @@ struct SweBenchResult {
     best: bool,
 }
 
-pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Result<()> {
+/// Generate a comparison-specific HTML report from pre-filtered results.
+/// The `results` parameter should already have its `models` object filtered to
+/// contain only the models relevant to this comparison, and `kld_pairwise`
+/// should be filtered similarly.
+pub fn generate_comparison_report(
+    results: &serde_json::Value,
+    output_dir: &Path,
+    filename: &str,
+) -> Result<()> {
+    let html = render_report_html(results)?;
+    let filepath = output_dir.join(filename);
+    fs::write(&filepath, html)?;
+    println!("Comparison report: {}", filename);
+    Ok(())
+}
+
+/// Filter results JSON to include only the models specified in a comparison.
+/// Returns a new JSON object with `models` and `kld_pairwise` keys, where
+/// `models` contains only the models in the comparison's model list, and
+/// `kld_pairwise` is filtered to include only entries where both models are
+/// in the comparison (and avg_kld_to_others entries are filtered by model names).
+pub fn filter_comparison_results(
+    results: &serde_json::Value,
+    comparison: &Comparison,
+) -> serde_json::Value {
+    let filtered_models: serde_json::Map<String, serde_json::Value> = results
+        .get("models")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter(|(name, _)| comparison.models.contains(name))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Filter kld_pairwise if present
+    let filtered_kld_pairwise = results
+        .get("kld_pairwise")
+        .and_then(|v| v.as_object())
+        .map(|pairwise| {
+            // Keep avg_kld_to_others filtered by comparison models
+            let filtered_avg: Option<serde_json::Value> = pairwise
+                .get("avg_kld_to_others")
+                .and_then(|v| v.as_object())
+                .and_then(|avg_obj| {
+                    let mut map = serde_json::Map::new();
+                    for (name, val) in avg_obj {
+                        if comparison.models.contains(name) {
+                            map.insert(name.clone(), val.clone());
+                        }
+                    }
+                    if !map.is_empty() {
+                        Some(serde_json::Value::Object(map))
+                    } else {
+                        None
+                    }
+                });
+
+            // Filter pairwise entries: keep only pairs where both models are in the comparison
+            let mut new_pairwise = serde_json::Map::new();
+            for (key, val) in pairwise {
+                if key == "avg_kld_to_others" {
+                    continue;
+                }
+                if let Some(models) = val.get("models").and_then(|v| v.as_array()) {
+                    let model_names: Vec<String> = models
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if model_names.len() == 2
+                        && comparison.models.contains(&model_names[0])
+                        && comparison.models.contains(&model_names[1])
+                    {
+                        new_pairwise.insert(key.clone(), val.clone());
+                    }
+                }
+            }
+
+            let mut result_map = serde_json::Map::new();
+            if let Some(avg_value) = filtered_avg {
+                result_map.insert("avg_kld_to_others".to_string(), avg_value);
+            }
+            for (k, v) in new_pairwise {
+                result_map.insert(k, v);
+            }
+            if result_map.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Object(result_map)
+            }
+        })
+        .unwrap_or(serde_json::Value::Null);
+
+    serde_json::json!({
+        "models": filtered_models,
+        "kld_pairwise": filtered_kld_pairwise,
+    })
+}
+
+fn render_report_html(results: &serde_json::Value) -> Result<String> {
     let models_evaluated: Vec<String> = results
         .get("models")
         .and_then(|v| v.as_object())
@@ -187,8 +288,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         .to_string();
 
     let models_evaluated_str = models_evaluated.join(", ");
-    // HTML report using askama template
-    let html = ReportTemplate {
+    ReportTemplate {
         timestamp: &timestamp,
         models_evaluated: &models_evaluated_str,
         mmlu_pro_results: &mmlu_pro_results,
@@ -204,12 +304,47 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         summary: &summary,
     }
     .render()
-    .map_err(|e| anyhow::anyhow!("Template rendering error: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("Template rendering error: {}", e))
+}
 
+pub fn generate_reports(
+    results: &serde_json::Value,
+    output_dir: &Path,
+    comparisons: &[Comparison],
+) -> Result<()> {
+    // Main HTML report
+    let html = render_report_html(results)?;
     fs::write(output_dir.join("benchmark_report.html"), html)?;
     println!("HTML report: benchmark_report.html");
 
     // Markdown report
+    let models_evaluated: Vec<String> = results
+        .get("models")
+        .and_then(|v| v.as_object())
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default();
+    let mmlu_pro_results = extract_mmlu_results(results);
+    let gpqa_results = extract_gpqa_results(results);
+    let aime_results = extract_aime_results(results);
+    let math500_results = extract_math500_results(results);
+    let minebench_results = extract_minebench_results(results);
+    let coding_eval_results = extract_coding_eval_results(results);
+    let swe_bench_results = extract_swe_bench_results(results);
+    let token_usage_results = extract_token_usage_results(results);
+    let kld_results = convert_kld_results(results);
+    let summary = generate_summary(
+        &mmlu_pro_results,
+        &gpqa_results,
+        &aime_results,
+        &math500_results,
+        &minebench_results,
+        &coding_eval_results,
+        &swe_bench_results,
+        &kld_results,
+    );
+    let timestamp = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
     let md = generate_markdown_report(
         &timestamp,
         &models_evaluated,
@@ -231,6 +366,25 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
     let json = serde_json::to_string_pretty(results)?;
     fs::write(output_dir.join("results.json"), json)?;
     println!("Raw results: results.json");
+
+    // Per-comparison reports
+    for (idx, comparison) in comparisons.iter().enumerate() {
+        if comparison.models.is_empty() {
+            continue;
+        }
+        let slug = crate::utils::slugify(&comparison.title);
+        let filename = if slug.is_empty() {
+            format!("comparison-{}.html", idx)
+        } else {
+            format!("{}.html", slug)
+        };
+
+        // Filter the results to only include models in this comparison
+        let filtered_results = filter_comparison_results(results, comparison);
+
+        // Generate the comparison report
+        generate_comparison_report(&filtered_results, output_dir, &filename)?;
+    }
 
     Ok(())
 }

@@ -39,6 +39,17 @@ enum Commands {
         results: String,
         #[arg(short, long, default_value = "benchmark_results")]
         output: String,
+        #[arg(short = 'c', long, default_value = DEFAULT_CONFIG)]
+        config: String,
+    },
+    /// Generate only comparison reports from existing results.
+    Compare {
+        #[arg(short = 'c', long, default_value = DEFAULT_CONFIG)]
+        config: String,
+        #[arg(short, long, default_value = RESULTS_FILE)]
+        results: String,
+        #[arg(short, long, default_value = "benchmark_results")]
+        output: String,
     },
 }
 
@@ -47,7 +58,16 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Run { config, no_resume } => run_benchmarks(&config, no_resume),
         Commands::TestModels { config } => test_models(&config),
-        Commands::Report { results, output } => generate_report(&results, &output),
+        Commands::Report {
+            results,
+            output,
+            config,
+        } => generate_report(&results, &output, &config),
+        Commands::Compare {
+            config,
+            results,
+            output,
+        } => generate_comparison_reports(&config, &results, &output),
     }
 }
 
@@ -264,7 +284,7 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
 
     let output_dir = Path::new("benchmark_results");
     fs::create_dir_all(output_dir)?;
-    report::generate_reports(&final_results, output_dir)?;
+    report::generate_reports(&final_results, output_dir, &config.comparisons)?;
     println!("\nBenchmark complete.");
     Ok(())
 }
@@ -411,11 +431,55 @@ fn save_results(
     Ok(())
 }
 
-fn generate_report(results_path: &str, output_dir: &str) -> Result<()> {
+fn generate_report(results_path: &str, output_dir: &str, config_path: &str) -> Result<()> {
     let content = fs::read_to_string(results_path)?;
     let results: serde_json::Value = serde_json::from_str(&content)?;
     let output_path = Path::new(output_dir);
     fs::create_dir_all(output_path)?;
-    report::generate_reports(&results, output_path)?;
+    // Load config for comparisons
+    let comparisons = if let Ok(config) = config::load_config(config_path) {
+        config.comparisons
+    } else {
+        Vec::new()
+    };
+    report::generate_reports(&results, output_path, &comparisons)?;
+    Ok(())
+}
+
+/// Generate only comparison reports from existing results (standalone `compare` command).
+fn generate_comparison_reports(
+    config_path: &str,
+    results_path: &str,
+    output_dir: &str,
+) -> Result<()> {
+    let config = config::load_config(config_path)?;
+    if config.comparisons.is_empty() {
+        println!("No comparisons defined in config.");
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(results_path)?;
+    let results: serde_json::Value = serde_json::from_str(&content)?;
+    let output_path = Path::new(output_dir);
+    fs::create_dir_all(output_path)?;
+
+    // Generate only comparison reports (no main report)
+    for (idx, comparison) in config.comparisons.iter().enumerate() {
+        if comparison.models.is_empty() {
+            continue;
+        }
+        let slug = utils::slugify(&comparison.title);
+        let filename = if slug.is_empty() {
+            format!("comparison-{}.html", idx)
+        } else {
+            format!("{}.html", slug)
+        };
+
+        // Filter the results to only include models in this comparison
+        let filtered_results = report::filter_comparison_results(&results, comparison);
+
+        report::generate_comparison_report(&filtered_results, output_path, &filename)?;
+    }
+
     Ok(())
 }

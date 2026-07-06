@@ -1,0 +1,25 @@
+models:
+  - display_name: "MyModel Q4"
+    proxy: "http://localhost:8000/v1"
+    cmd: "true"
+    cmd_stop: "echo stop"
+    model_name: "test"
+  - display_name: "MyModel Q5"
+    proxy: "http://localhost:8001/v1"
+    cmd: "true"
+    cmd_stop: "echo stop"
+    model_name: "test"
+
+benchmark: {}
+
+benchmarks:
+
+comparisons:
+  - title: "Q4 vs Q5"
+    models:
+      - "MyModel Q4"
+      - "MyModel Q5"
+  - title: "!!!"
+    models:
+      - "MyModel Q4"
+      - "MyModel Q5"

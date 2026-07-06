@@ -10,6 +10,17 @@ pub struct Config {
     pub benchmark: HashMap<String, serde_yaml::Value>,
     #[serde(default)]
     pub docker: DockerConfig,
+    /// Optional list of model comparisons to generate filtered reports for.
+    #[serde(default)]
+    pub comparisons: Vec<Comparison>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Comparison {
+    /// Human-readable title for the comparison group.
+    pub title: String,
+    /// Display names of models to include in this comparison report.
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
