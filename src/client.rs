@@ -106,7 +106,7 @@ impl Client {
     }
     pub fn check_health(&self) -> Result<()> {
         let url = self.base_url.join("models")?;
-        let resp = self.http.get(url).send()?;
+        let resp = self.http.get(url).send()?.error_for_status()?;
         let response: ModelsResponse = resp.json()?;
         if response.data.is_empty() {
             return Err(anyhow::anyhow!("No models available"));

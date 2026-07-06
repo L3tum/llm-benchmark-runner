@@ -52,19 +52,31 @@ pub fn run_model(
                 .unwrap_or(serde_yaml::Value::Null),
             docker_config,
         );
-        match benchmarks::execute_benchmark(bench_name, model, &bench_cfg) {
-            Ok(result) => {
-                model_results.insert(bench_name.to_string(), result);
-                new_successful.push(bench_name.to_string());
+
+        if wait_for_health(&client) {
+            println!("  Proxy healthy before {}.", bench_name);
+            match benchmarks::execute_benchmark(bench_name, model, &bench_cfg) {
+                Ok(result) => {
+                    model_results.insert(bench_name.to_string(), result);
+                    new_successful.push(bench_name.to_string());
+                }
+                Err(e) => {
+                    eprintln!("  ERROR: {} - {}", bench_name, e);
+                    model_results.insert(
+                        bench_name.to_string(),
+                        serde_json::json!({"error": e.to_string()}),
+                    );
+                    new_failed.push(bench_name.to_string());
+                }
             }
-            Err(e) => {
-                eprintln!("  ERROR: {} - {}", bench_name, e);
-                model_results.insert(
-                    bench_name.to_string(),
-                    serde_json::json!({"error": e.to_string()}),
-                );
-                new_failed.push(bench_name.to_string());
-            }
+        } else {
+            let message = "proxy not healthy before benchmark execution";
+            eprintln!("  ERROR: {} - {}", bench_name, message);
+            model_results.insert(
+                bench_name.to_string(),
+                serde_json::json!({"error": message}),
+            );
+            new_failed.push(bench_name.to_string());
         }
         let bench_duration = bench_start.elapsed();
 
@@ -168,13 +180,25 @@ impl Drop for ModelProcessGuard {
 }
 
 pub fn wait_for_health(client: &Client) -> bool {
+    const STABLE_HEALTH_CHECKS: usize = 2;
     let timeout = Duration::from_secs(120);
     let poll = Duration::from_secs(2);
     let deadline = Instant::now() + timeout;
+    let mut consecutive_successes = 0;
+
     while Instant::now() < deadline {
         match client.check_health() {
-            Ok(_) => return true,
-            Err(_) => std::thread::sleep(poll),
+            Ok(_) => {
+                consecutive_successes += 1;
+                if consecutive_successes >= STABLE_HEALTH_CHECKS {
+                    return true;
+                }
+                std::thread::sleep(poll);
+            }
+            Err(_) => {
+                consecutive_successes = 0;
+                std::thread::sleep(poll);
+            }
         }
     }
     false
