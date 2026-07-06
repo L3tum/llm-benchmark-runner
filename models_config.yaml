@@ -16,6 +16,7 @@ benchmarks:
   - mmlu_pro
   - kld
   # - minebench
+  # - coding_eval
 
 benchmark:
   mmlu_pro:
@@ -30,6 +31,20 @@ benchmark:
     buildings: [castle, dragon, train]
     # Optional legacy/custom single prompt:
     # build: "A compact test castle"
+  coding_eval:
+    # Requires Docker. Default taskset downloads EvalPlus HumanEval+.
+    tasksets:
+      humaneval_plus: ~
+      # mbpp: ~
+      # human_eval: ~
+    num_samples: 10
+    timeout_secs: 8
+    enable_pass2: false
+    enable_pass3: false
+    language_images:
+      python: python:3.12
+    # For Docker-socket passthrough from inside a container:
+    # host_repo_path: /host/path/to/llm-benchmark-runner
 
 # Extensible: add custom benchmark sections here
 custom_bench:

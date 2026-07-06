@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub mod aime;
+pub mod coding_eval;
 pub mod gpqa;
 pub mod kld;
 pub mod math500;
@@ -53,6 +54,10 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "minebench".to_string(),
             Box::new(minebench::MinebenchBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "coding_eval".to_string(),
+            Box::new(coding_eval::CodingEvalBenchmark) as Box<dyn Benchmark>,
         );
         map
     })

@@ -11,6 +11,7 @@ benchmarks:
   - aime
   - math500
   - minebench
+  # - coding_eval
 
 benchmark:
   mmlu_pro:
@@ -33,3 +34,13 @@ benchmark:
     buildings: [castle, dragon, train]
     # Optional legacy/custom single prompt:
     # build: "A compact test castle"
+  coding_eval:
+    tasksets:
+      humaneval_plus: ~
+    num_samples: 1
+    timeout_secs: 8
+    enable_pass2: false
+    enable_pass3: false
+    language_images:
+      python: python:3.12
+    # host_repo_path: /host/path/to/llm-benchmark-runner

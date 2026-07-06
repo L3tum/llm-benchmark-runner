@@ -219,6 +219,77 @@
     </tbody>
   </table>
 
+  <h2>💻 Coding Eval</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Pass@1</th><th>Pass@2</th><th>Pass@3</th><th>Passed</th><th>Timeouts</th><th>Skipped Attempts</th><th>Output Tokens</th><th>Thinking Tokens</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in coding_eval_results.iter() %}
+      {% set model = entry.0 %}
+      {% set data = entry.1 %}
+      <tr class="{% if data.best %}best{% endif %}">
+        <td>{{ model }}</td>
+        <td>{{ data.pass_at_1_pct }}%</td>
+        <td>{{ data.pass_at_2_pct }}{% if data.pass_at_2_pct != "–" %}%{% endif %}</td>
+        <td>{{ data.pass_at_3_pct }}{% if data.pass_at_3_pct != "–" %}%{% endif %}</td>
+        <td>{{ data.passed }}/{{ data.total_questions }}</td>
+        <td>{{ data.timeout_count }}</td>
+        <td>{{ data.skipped_later_attempts }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Coding Eval Tasksets</h3>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Taskset</th><th>Pass@1</th><th>Pass@2</th><th>Pass@3</th><th>Passed</th><th>Timeouts</th><th>Skipped Attempts</th></tr>
+    </thead>
+    <tbody class="subject-breakdown">
+      {% for entry in coding_eval_results.iter() %}
+      {% set model = entry.0 %}
+      {% for taskset_entry in entry.1.results_by_taskset.iter() %}
+      {% set taskset = taskset_entry.0 %}
+      {% set row = taskset_entry.1 %}
+      <tr>
+        <td>{{ model }}</td>
+        <td>{{ taskset }}</td>
+        <td>{{ row.pass_at_1_pct }}%</td>
+        <td>{{ row.pass_at_2_pct }}{% if row.pass_at_2_pct != "–" %}%{% endif %}</td>
+        <td>{{ row.pass_at_3_pct }}{% if row.pass_at_3_pct != "–" %}%{% endif %}</td>
+        <td>{{ row.passed }}/{{ row.total }}</td>
+        <td>{{ row.timeout_count }}</td>
+        <td>{{ row.skipped_later_attempts }}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Coding Eval Failures</h3>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Taskset</th><th>Task</th><th>Entry Point</th><th>Error</th></tr>
+    </thead>
+    <tbody class="subject-breakdown">
+      {% for entry in coding_eval_results.iter() %}
+      {% set model = entry.0 %}
+      {% for failure in entry.1.failures.iter() %}
+      <tr>
+        <td>{{ model }}</td>
+        <td>{{ failure.taskset }}</td>
+        <td>{{ failure.task_id }}</td>
+        <td>{{ failure.entry_point }}</td>
+        <td>{{ failure.error_summary }}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+
   <h2>🔁 KLD (Kullback-Leibler Divergence)</h2>
   <p>Average KL divergence between model output distributions (lower = more similar).</p>
 

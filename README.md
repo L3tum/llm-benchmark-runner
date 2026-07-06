@@ -1,6 +1,6 @@
 # Model Benchmark Suite
 
-A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it. Supports **MMLU-Pro** (auto-downloaded), **GPQA Diamond**, **AIME 2025**, **MATH-500**, and **KLD divergence** between models.
+A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it. Supports **MMLU-Pro** (auto-downloaded), **GPQA Diamond**, **AIME 2025**, **MATH-500**, **Coding Eval**, and **KLD divergence** between models.
 
 ## Quick Start
 
@@ -23,6 +23,7 @@ cargo run -- run --config models_config.yaml
 - **GPQA Diamond**: 198 graduate-level science questions (biology, chemistry, physics) with zero-shot CoT.
 - **AIME 2025**: 30 competition-level math problems with integer answer extraction.
 - **MATH-500**: 500 math problems across 7 subjects with per-subject accuracy.
+- **Coding Eval**: Docker-backed Python function-completion evaluation with HumanEval, HumanEval+, MBPP+, and iterative pass@2/pass@3 repair attempts.
 - **Resumable**: results saved after each model; rerunning skips completed models.
 - **Extensible benchmarks**: add a new benchmark by creating a module in `src/benchmarks/` and registering it in `src/benchmarks/mod.rs`.
 - **CLI config override**: `--config path/to/config.yaml` for all commands.
@@ -31,6 +32,7 @@ cargo run -- run --config models_config.yaml
 
 - **Rust 1.83+** (stable)
 - A GGUF model and a runner (llama-server, ollama, etc.) that exposes an OpenAI-compatible API
+- **Docker** if you enable `coding_eval` (generated code is executed with `docker run`, default image `python:3.12`)
 
 ## Installation
 
@@ -79,6 +81,18 @@ benchmark:
   math500:
     # num_samples: 50   # use all 500 if omitted
     # subjects: "algebra"   # filter by subject (comma-separated), null = all subjects
+  coding_eval:
+    tasksets:
+      humaneval_plus: ~  # '~' infers type=humaneval_plus, language=python
+      # mbpp: ~
+      # human_eval: ~
+    num_samples: 10
+    timeout_secs: 8
+    enable_pass2: false
+    enable_pass3: false
+    language_images:
+      python: python:3.12
+    # host_repo_path: /host/path/to/llm-benchmark-runner  # for Docker socket passthrough
 ```
 
 Each model is:
@@ -214,6 +228,40 @@ math500:
   num_samples: 50      # use all 500 if omitted
   subjects: "algebra"   # filter by subject (comma-separated), null = all subjects
 ```
+
+### Coding Eval
+
+Docker-backed Python coding evaluation. The benchmark downloads public tasksets used by other evaluators:
+
+- `humaneval_plus` — EvalPlus HumanEval+ (default)
+- `mbpp` — EvalPlus MBPP+
+- `human_eval` — original OpenAI HumanEval
+
+Generated code is written under `benchmark_results/coding_eval_runs/...` and executed with `docker run` using a read-only mount and no network. The project Docker image includes the Docker CLI; mount `/var/run/docker.sock` if running the benchmark runner in Docker. If the runner itself runs inside Docker while using the host Docker socket, set `host_repo_path` to the host-visible repository path so bind mounts resolve correctly.
+
+Configuration:
+```yaml
+coding_eval:
+  tasksets:
+    humaneval_plus: ~  # shorthand for type=humaneval_plus, language=python
+    # mbpp: ~
+    # human_eval: ~
+    # custom:
+    #   type: human_eval
+    #   language: python
+    #   tasks_path: ./benchmarks/custom.jsonl.gz
+  num_samples: 10       # per taskset; omit for all tasks
+  timeout_secs: 8
+  enable_pass2: true    # only runs attempt 2 for tasks that fail pass@1
+  enable_pass3: false   # only runs attempt 3 for tasks that still fail pass@2
+  language_images:
+    python: python:3.12
+  # host_repo_path: /home/me/llm-benchmark-runner
+```
+
+`enable_pass2`/`enable_pass3` use iterative repair, not independent sampling: the failed solution plus Docker stdout/stderr/error summary is fed back to the model. If an earlier attempt passes, later enabled attempts are marked passed and skipped without another model call.
+
+Taskset entries use `type` to choose the dataset schema/harness and `language` to choose the Docker runner. The current implementation supports Python runners. MultiPL-E-style multi-language tasksets are planned for a future extension.
 
 ## Example Full Configuration
 

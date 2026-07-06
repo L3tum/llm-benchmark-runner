@@ -105,6 +105,42 @@ struct MinebenchResult {
     thinking_tokens: String,
 }
 
+#[derive(Serialize)]
+struct CodingEvalTasksetResult {
+    pass_at_1_pct: String,
+    pass_at_2_pct: String,
+    pass_at_3_pct: String,
+    passed: i64,
+    total: i64,
+    timeout_count: i64,
+    skipped_later_attempts: i64,
+}
+
+#[derive(Serialize)]
+struct CodingEvalFailure {
+    taskset: String,
+    task_id: String,
+    entry_point: String,
+    error_summary: String,
+}
+
+#[derive(Serialize)]
+struct CodingEvalResult {
+    pass_score: f64,
+    pass_at_1_pct: String,
+    pass_at_2_pct: String,
+    pass_at_3_pct: String,
+    passed: i64,
+    total_questions: i64,
+    timeout_count: i64,
+    skipped_later_attempts: i64,
+    output_tokens: String,
+    thinking_tokens: String,
+    results_by_taskset: HashMap<String, CodingEvalTasksetResult>,
+    failures: Vec<CodingEvalFailure>,
+    best: bool,
+}
+
 pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Result<()> {
     let models_evaluated: Vec<String> = results
         .get("models")
@@ -117,6 +153,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
     let aime_results = extract_aime_results(results);
     let math500_results = extract_math500_results(results);
     let minebench_results = extract_minebench_results(results);
+    let coding_eval_results = extract_coding_eval_results(results);
     let token_usage_results = extract_token_usage_results(results);
     let kld_results = convert_kld_results(results);
 
@@ -126,6 +163,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         &aime_results,
         &math500_results,
         &minebench_results,
+        &coding_eval_results,
         &kld_results,
     );
     let timestamp = chrono::Utc::now()
@@ -142,6 +180,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         aime_results: &aime_results,
         math500_results: &math500_results,
         minebench_results: &minebench_results,
+        coding_eval_results: &coding_eval_results,
         token_usage_results: &token_usage_results,
         kld_results: &kld_results.pairwise,
         avg_kld_to_others: &kld_results.avg_kld_to_others,
@@ -162,6 +201,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         &aime_results,
         &math500_results,
         &minebench_results,
+        &coding_eval_results,
         &token_usage_results,
         &kld_results,
         &summary,
@@ -187,6 +227,7 @@ pub struct ReportTemplate<'a> {
     aime_results: &'a HashMap<String, AimeResult>,
     math500_results: &'a HashMap<String, Math500Result>,
     minebench_results: &'a HashMap<String, MinebenchResult>,
+    coding_eval_results: &'a HashMap<String, CodingEvalResult>,
     token_usage_results: &'a HashMap<String, HashMap<String, TokenUsageResult>>,
     kld_results: &'a HashMap<String, KldPairResult>,
     avg_kld_to_others: &'a HashMap<String, KldAvgResult>,
@@ -512,6 +553,169 @@ fn extract_minebench_results(results: &serde_json::Value) -> HashMap<String, Min
     map
 }
 
+fn extract_coding_eval_results(results: &serde_json::Value) -> HashMap<String, CodingEvalResult> {
+    let mut map = HashMap::new();
+    let models = results.get("models").and_then(|v| v.as_object());
+    let best_score = models.and_then(|models| {
+        models
+            .values()
+            .filter_map(|data| data.get("coding_eval"))
+            .filter_map(coding_eval_score)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    if let Some(models) = models {
+        for (name, data) in models {
+            if let Some(coding) = data.get("coding_eval").and_then(|v| v.as_object()) {
+                let pass_at_1 = coding
+                    .get("pass_at_1")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let pass_at_2 = coding.get("pass_at_2").and_then(|v| v.as_f64());
+                let pass_at_3 = coding.get("pass_at_3").and_then(|v| v.as_f64());
+                let pass_score = pass_at_3.or(pass_at_2).unwrap_or(pass_at_1);
+                let passed = coding.get("passed").and_then(|v| v.as_i64()).unwrap_or(0);
+                let total_questions = coding
+                    .get("total_questions")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let timeout_count = coding
+                    .get("timeout_count")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let skipped_later_attempts = coding
+                    .get("skipped_later_attempts")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let results_by_taskset = coding
+                    .get("results_by_taskset")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter()
+                            .filter_map(|(taskset, val)| {
+                                val.as_object().map(|row| {
+                                    let p1 = row
+                                        .get("pass_at_1")
+                                        .and_then(|v| v.as_f64())
+                                        .unwrap_or(0.0);
+                                    let p2 = row.get("pass_at_2").and_then(|v| v.as_f64());
+                                    let p3 = row.get("pass_at_3").and_then(|v| v.as_f64());
+                                    (
+                                        taskset.clone(),
+                                        CodingEvalTasksetResult {
+                                            pass_at_1_pct: pct(p1),
+                                            pass_at_2_pct: p2
+                                                .map(pct)
+                                                .unwrap_or_else(|| "–".to_string()),
+                                            pass_at_3_pct: p3
+                                                .map(pct)
+                                                .unwrap_or_else(|| "–".to_string()),
+                                            passed: row
+                                                .get("passed")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                            total: row
+                                                .get("total")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                            timeout_count: row
+                                                .get("timeout_count")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                            skipped_later_attempts: row
+                                                .get("skipped_later_attempts")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0),
+                                        },
+                                    )
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let failures = coding
+                    .get("tasks")
+                    .and_then(|v| v.as_array())
+                    .map(|tasks| {
+                        tasks
+                            .iter()
+                            .filter(|task| {
+                                !task
+                                    .get("passed")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false)
+                            })
+                            .filter_map(|task| {
+                                Some(CodingEvalFailure {
+                                    taskset: task.get("taskset")?.as_str()?.to_string(),
+                                    task_id: task.get("task_id")?.as_str()?.to_string(),
+                                    entry_point: task
+                                        .get("entry_point")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    error_summary: last_attempt_error(task),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                map.insert(
+                    name.clone(),
+                    CodingEvalResult {
+                        pass_score,
+                        pass_at_1_pct: pct(pass_at_1),
+                        pass_at_2_pct: pass_at_2.map(pct).unwrap_or_else(|| "–".to_string()),
+                        pass_at_3_pct: pass_at_3.map(pct).unwrap_or_else(|| "–".to_string()),
+                        passed,
+                        total_questions,
+                        timeout_count,
+                        skipped_later_attempts,
+                        output_tokens: format_optional_u64(coding.get("output_tokens")),
+                        thinking_tokens: format_optional_u64(coding.get("thinking_tokens")),
+                        results_by_taskset,
+                        failures,
+                        best: best_score == Some(pass_score),
+                    },
+                );
+            }
+        }
+    }
+    map
+}
+
+fn coding_eval_score(value: &serde_json::Value) -> Option<f64> {
+    value
+        .get("pass_at_3")
+        .and_then(|v| v.as_f64())
+        .or_else(|| value.get("pass_at_2").and_then(|v| v.as_f64()))
+        .or_else(|| value.get("pass_at_1").and_then(|v| v.as_f64()))
+}
+
+fn last_attempt_error(task: &serde_json::Value) -> String {
+    task.get("attempts")
+        .and_then(|v| v.as_array())
+        .and_then(|attempts| {
+            attempts
+                .iter()
+                .rev()
+                .find(|attempt| {
+                    !attempt
+                        .get("skipped")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+                .and_then(|attempt| attempt.get("error_summary"))
+        })
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn pct(value: f64) -> String {
+    format!("{:.1}", value * 100.0)
+}
+
 fn extract_token_usage_results(
     results: &serde_json::Value,
 ) -> HashMap<String, HashMap<String, TokenUsageResult>> {
@@ -549,6 +753,23 @@ fn format_optional_u64(value: Option<&serde_json::Value>) -> String {
         .and_then(|v| v.as_u64())
         .map(|v| v.to_string())
         .unwrap_or_else(|| "–".to_string())
+}
+
+fn format_optional_pct(value: &str) -> String {
+    if value == "–" {
+        "–".to_string()
+    } else {
+        format!("{}%", value)
+    }
+}
+
+fn escape_md_cell(value: &str) -> String {
+    value
+        .replace('|', "\\|")
+        .replace('\n', "<br>")
+        .chars()
+        .take(500)
+        .collect()
 }
 
 fn convert_kld_results(results: &serde_json::Value) -> KldResults {
@@ -638,6 +859,7 @@ fn generate_summary(
     aime_results: &HashMap<String, AimeResult>,
     math500_results: &HashMap<String, Math500Result>,
     minebench_results: &HashMap<String, MinebenchResult>,
+    coding_eval_results: &HashMap<String, CodingEvalResult>,
     kld_results: &KldResults,
 ) -> Vec<String> {
     let mut summary = Vec::new();
@@ -709,6 +931,22 @@ fn generate_summary(
         ));
     }
 
+    if let Some((model, data)) = coding_eval_results
+        .iter()
+        .max_by(|(_a, a_data), (_b, b_data)| {
+            a_data
+                .pass_score
+                .partial_cmp(&b_data.pass_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    {
+        summary.push(format!(
+            "Highest Coding Eval pass score: {} ({:.1}%)",
+            model,
+            data.pass_score * 100.0
+        ));
+    }
+
     // KLD summary
     if let Some((model, data)) =
         kld_results
@@ -744,6 +982,7 @@ fn generate_markdown_report(
     aime_results: &HashMap<String, AimeResult>,
     math500_results: &HashMap<String, Math500Result>,
     minebench_results: &HashMap<String, MinebenchResult>,
+    coding_eval_results: &HashMap<String, CodingEvalResult>,
     token_usage_results: &HashMap<String, HashMap<String, TokenUsageResult>>,
     kld_results: &KldResults,
     summary: &[String],
@@ -881,6 +1120,58 @@ fn generate_markdown_report(
                 data.output_tokens,
                 data.thinking_tokens
             ));
+        }
+    }
+
+    // Coding Eval
+    if !coding_eval_results.is_empty() {
+        md.push_str("\n## Coding Eval (higher is better)\n\n| Model | Pass@1 | Pass@2 | Pass@3 | Passed | Timeouts | Skipped Attempts | Output Tokens | Thinking Tokens |\n|-------|--------|--------|--------|--------|----------|------------------|---------------|-----------------|\n");
+        for (model, data) in coding_eval_results {
+            md.push_str(&format!(
+                "| {} | {}% | {} | {} | {}/{} | {} | {} | {} | {} |\n",
+                model,
+                data.pass_at_1_pct,
+                format_optional_pct(&data.pass_at_2_pct),
+                format_optional_pct(&data.pass_at_3_pct),
+                data.passed,
+                data.total_questions,
+                data.timeout_count,
+                data.skipped_later_attempts,
+                data.output_tokens,
+                data.thinking_tokens
+            ));
+        }
+
+        md.push_str("\n### Coding Eval Tasksets\n\n| Model | Taskset | Pass@1 | Pass@2 | Pass@3 | Passed | Timeouts | Skipped Attempts |\n|-------|---------|--------|--------|--------|--------|----------|------------------|\n");
+        for (model, data) in coding_eval_results {
+            for (taskset, row) in &data.results_by_taskset {
+                md.push_str(&format!(
+                    "| {} | {} | {}% | {} | {} | {}/{} | {} | {} |\n",
+                    model,
+                    taskset,
+                    row.pass_at_1_pct,
+                    format_optional_pct(&row.pass_at_2_pct),
+                    format_optional_pct(&row.pass_at_3_pct),
+                    row.passed,
+                    row.total,
+                    row.timeout_count,
+                    row.skipped_later_attempts
+                ));
+            }
+        }
+
+        md.push_str("\n### Coding Eval Failures\n\n| Model | Taskset | Task | Entry Point | Error |\n|-------|---------|------|-------------|-------|\n");
+        for (model, data) in coding_eval_results {
+            for failure in &data.failures {
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} | {} |\n",
+                    model,
+                    failure.taskset,
+                    failure.task_id,
+                    failure.entry_point,
+                    escape_md_cell(&failure.error_summary)
+                ));
+            }
         }
     }
 
