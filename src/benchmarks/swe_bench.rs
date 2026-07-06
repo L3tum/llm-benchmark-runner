@@ -1,6 +1,6 @@
 use crate::client::Client;
 use crate::config::Model;
-use crate::docker_runner::{DockerMount, DockerRunConfig, DockerRunner};
+use crate::docker_runner::{DockerBuildConfig, DockerMount, DockerRunConfig, DockerRunner};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -48,6 +48,7 @@ struct SweBenchConfig {
     timeout_secs: u64,
     host_repo_path: Option<PathBuf>,
     harness_image: String,
+    build_images: bool,
     max_workers: usize,
     docker_socket_path: PathBuf,
     mount_docker_socket: bool,
@@ -93,7 +94,7 @@ impl super::Benchmark for SweBenchBenchmark {
 
     fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Basic, config)?;
-        let _ = load_or_download_dataset(&cfg)?;
+        prepare_swebench(&cfg)?;
         Ok(())
     }
 
@@ -109,7 +110,7 @@ impl super::Benchmark for SweBenchVerifiedBenchmark {
 
     fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Verified, config)?;
-        let _ = load_or_download_dataset(&cfg)?;
+        prepare_swebench(&cfg)?;
         Ok(())
     }
 
@@ -125,7 +126,7 @@ impl super::Benchmark for SweBenchProBenchmark {
 
     fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Pro, config)?;
-        let _ = load_or_download_dataset(&cfg)?;
+        prepare_swebench(&cfg)?;
         Ok(())
     }
 
@@ -140,6 +141,7 @@ fn execute_swebench(
     config: &serde_yaml::Value,
 ) -> Result<serde_json::Value> {
     let cfg = parse_config(dataset, config)?;
+    prepare_swebench(&cfg)?;
     let client = Client::new(&model.proxy)?;
     let mut instances = load_or_download_dataset(&cfg)?;
     if let Some(limit) = cfg.num_samples {
@@ -220,6 +222,54 @@ struct HarnessResult {
     stdout: String,
     stderr: String,
     error_summary: String,
+}
+
+fn prepare_swebench(cfg: &SweBenchConfig) -> Result<()> {
+    ensure_swebench_harness_image(cfg)?;
+    let _ = load_or_download_dataset(cfg)?;
+    Ok(())
+}
+
+fn ensure_swebench_harness_image(cfg: &SweBenchConfig) -> Result<()> {
+    if !cfg.build_images {
+        return Ok(());
+    }
+    if DockerRunner::image_exists(&cfg.harness_image)? {
+        return Ok(());
+    }
+
+    let context = Path::new("docker").join("swebench-harness");
+    let dockerfile = context.join("Dockerfile");
+    if !dockerfile.exists() {
+        return Err(anyhow::anyhow!(
+            "docker.build_images=true, but SWE-Bench harness Dockerfile was not found at {}",
+            dockerfile.display()
+        ));
+    }
+
+    println!(
+        "  Building SWE-Bench harness image {}...",
+        cfg.harness_image
+    );
+    let build = DockerBuildConfig::new(&cfg.harness_image, dockerfile, context, 300);
+    let output = DockerRunner::build_image(&build)?;
+    if output.timed_out {
+        return Err(anyhow::anyhow!(
+            "timed out building SWE-Bench harness image {} after {} seconds",
+            cfg.harness_image,
+            build.timeout_secs
+        ));
+    }
+    if !output.success() {
+        return Err(anyhow::anyhow!(
+            "failed to build SWE-Bench harness image {} (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            cfg.harness_image,
+            output.exit_code,
+            truncate(&output.stdout, 4000),
+            truncate(&output.stderr, 4000)
+        ));
+    }
+    Ok(())
 }
 
 fn run_swebench_harness(
@@ -342,6 +392,10 @@ fn parse_config(dataset: SweBenchDataset, config: &serde_yaml::Value) -> Result<
         .and_then(|v| v.as_str())
         .unwrap_or("llm-benchmark-runner/swebench-harness:latest")
         .to_string();
+    let build_images = docker_cfg
+        .and_then(|docker| docker.get("build_images"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let max_workers = docker_cfg
         .and_then(|docker| docker.get("max_workers"))
         .and_then(|v| v.as_i64())
@@ -365,6 +419,7 @@ fn parse_config(dataset: SweBenchDataset, config: &serde_yaml::Value) -> Result<
         timeout_secs,
         host_repo_path,
         harness_image,
+        build_images,
         max_workers,
         docker_socket_path,
         mount_docker_socket,
@@ -622,5 +677,21 @@ __docker:
         .unwrap();
         let parsed = parse_config(SweBenchDataset::Verified, &cfg).unwrap();
         assert_eq!(parsed.timeout_secs, 1800);
+    }
+
+    #[test]
+    fn swebench_honors_shared_build_images_flag() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+__docker:
+  build_images: true
+  images:
+    swebench_harness: harness:latest
+"#,
+        )
+        .unwrap();
+        let parsed = parse_config(SweBenchDataset::Verified, &cfg).unwrap();
+        assert!(parsed.build_images);
+        assert_eq!(parsed.harness_image, "harness:latest");
     }
 }

@@ -1,7 +1,7 @@
 # llm-benchmark-runner — Quality & Development Makefile
 # Run with `make` or `make <target>`
 
-.PHONY: check fmt clippy test miri deny all build-release docs
+.PHONY: check fmt clippy test miri deny all build-release swebench-harness-image docs
 
 # Quick pre-commit checks
 check:
@@ -34,6 +34,10 @@ all: check fmt-check clippy test deny
 # Build for release (static musl binary)
 build-release:
 	cargo build --release --target x86_64-unknown-linux-musl
+
+# Build the reusable SWE-Bench harness image used by docker.images.swebench_harness
+swebench-harness-image:
+	docker build -f docker/swebench-harness/Dockerfile -t llm-benchmark-runner/swebench-harness:latest docker/swebench-harness
 
 # Build docs
 docs:

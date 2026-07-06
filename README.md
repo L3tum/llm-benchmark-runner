@@ -290,6 +290,12 @@ Docker-backed code benchmarks are selected by benchmark name:
 
 Generated code is written under `benchmark_results/coding_eval_runs/...`; SWE-Bench predictions are written under `benchmark_results/swe_bench_runs/...`. Function-completion containers run with no network and read-only mounts. SWE-Bench harness containers may need network/build access to prepare repositories and environments.
 
+When `docker.build_images: true`, the runner automatically builds the reusable SWE-Bench harness image from `docker/swebench-harness/Dockerfile` if the configured `docker.images.swebench_harness` tag is not already present. To build it manually instead, run:
+
+```bash
+make swebench-harness-image
+```
+
 The project Docker image includes the Docker CLI. If running this runner inside Docker, mounting `/var/run/docker.sock` allows it to start sibling containers but also grants powerful access to the host Docker daemon. Use only in trusted environments. If using Docker socket passthrough, set top-level `docker.host_repo_path` to the host-visible repository path so bind mounts resolve correctly.
 
 Configuration:
@@ -305,7 +311,7 @@ docker:
   images:
     python: python:3.12
     swebench_harness: llm-benchmark-runner/swebench-harness:latest
-  build_images: true
+  build_images: true              # auto-build missing local benchmark images
   max_workers: 1
   mount_docker_socket: true
   docker_socket_path: /var/run/docker.sock

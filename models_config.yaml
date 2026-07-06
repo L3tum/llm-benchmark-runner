@@ -25,6 +25,7 @@ benchmarks:
   # - swebench_pro
 
 # Shared runtime settings for benchmarks that execute generated code/tests in Docker.
+# build_images auto-builds missing local benchmark images, including the SWE-Bench harness.
 docker:
   enabled: true
   default_timeout_secs: 8
