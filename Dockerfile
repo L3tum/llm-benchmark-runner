@@ -21,10 +21,10 @@ RUN --mount=type=cache,id=llm-benchmark-runner-cargo-registry,target=/root/.carg
     && cp target/x86_64-unknown-linux-musl/release/llm-benchmark-runner /llm-benchmark-runner
 
 # Runtime includes only the Docker CLI and our static binary. To let
-# coding_eval start sandbox containers, run this container with:
+# code/SWE-Bench benchmarks start sandbox/harness containers, run this container with:
 #   -v /var/run/docker.sock:/var/run/docker.sock
-# and set benchmark.coding_eval.host_repo_path when the host-visible repo path
-# differs from the in-container repo path.
+# and set docker.host_repo_path when the host-visible repo path differs from
+# the in-container repo path.
 FROM docker:27-cli
 
 COPY --from=builder /llm-benchmark-runner /llm-benchmark-runner

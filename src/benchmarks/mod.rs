@@ -10,6 +10,7 @@ pub mod kld;
 pub mod math500;
 pub mod minebench;
 pub mod mmlu_pro;
+pub mod swe_bench;
 
 /// Trait for all benchmarks.
 pub trait Benchmark: Send + Sync {
@@ -58,6 +59,30 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "coding_eval".to_string(),
             Box::new(coding_eval::CodingEvalBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "humaneval".to_string(),
+            Box::new(coding_eval::HumanEvalBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "humaneval_plus".to_string(),
+            Box::new(coding_eval::HumanEvalPlusBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "mbpp_plus".to_string(),
+            Box::new(coding_eval::MbppPlusBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "swebench".to_string(),
+            Box::new(swe_bench::SweBenchBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "swebench_verified".to_string(),
+            Box::new(swe_bench::SweBenchVerifiedBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "swebench_pro".to_string(),
+            Box::new(swe_bench::SweBenchProBenchmark) as Box<dyn Benchmark>,
         );
         map
     })

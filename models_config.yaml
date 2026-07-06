@@ -16,7 +16,27 @@ benchmarks:
   - mmlu_pro
   - kld
   # - minebench
-  # - coding_eval
+  # Function-completion coding benchmarks:
+  # - humaneval_plus
+  # - humaneval
+  # - mbpp_plus
+  # Repository patch benchmarks:
+  # - swebench_verified
+  # - swebench_pro
+
+# Shared runtime settings for benchmarks that execute generated code/tests in Docker.
+docker:
+  enabled: true
+  default_timeout_secs: 8
+  images:
+    python: python:3.12
+    swebench_harness: llm-benchmark-runner/swebench-harness:latest
+  build_images: true
+  max_workers: 1
+  mount_docker_socket: true
+  docker_socket_path: /var/run/docker.sock
+  # Required when this runner itself runs in Docker with the host Docker socket mounted:
+  # host_repo_path: /host/path/to/llm-benchmark-runner
 
 benchmark:
   mmlu_pro:
@@ -31,20 +51,33 @@ benchmark:
     buildings: [castle, dragon, train]
     # Optional legacy/custom single prompt:
     # build: "A compact test castle"
-  coding_eval:
-    # Requires Docker. Default taskset downloads EvalPlus HumanEval+.
-    tasksets:
-      humaneval_plus: ~
-      # mbpp: ~
-      # human_eval: ~
+  humaneval_plus:
+    # Requires Docker. Oracle-separated EvalPlus-style evaluation.
     num_samples: 10
     timeout_secs: 8
     enable_pass2: false
     enable_pass3: false
-    language_images:
-      python: python:3.12
-    # For Docker-socket passthrough from inside a container:
-    # host_repo_path: /host/path/to/llm-benchmark-runner
+  humaneval:
+    # Original HumanEval uses public tests embedded in the dataset.
+    num_samples: 10
+  mbpp_plus:
+    num_samples: 10
+  swebench_verified:
+    # Requires Docker and a SWE-Bench harness image.
+    num_samples: 1
+    split: test
+    timeout_secs: 1800
+  swebench_pro:
+    num_samples: 1
+    split: test
+    timeout_secs: 1800
+    token_env: HF_TOKEN
+    # dataset_id: SWE-bench/SWE-bench_Pro
+  coding_eval:
+    # Backwards-compatible umbrella config shape; prefer the explicit benchmark names above.
+    tasksets:
+      humaneval_plus: ~
+    num_samples: 10
 
 # Extensible: add custom benchmark sections here
 custom_bench:

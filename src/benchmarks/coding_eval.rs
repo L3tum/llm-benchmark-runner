@@ -1,5 +1,6 @@
 use crate::client::Client;
 use crate::config::Model;
+use crate::docker_runner::{DockerMount, DockerRunConfig, DockerRunner};
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use regex::Regex;
@@ -10,10 +11,11 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct CodingEvalBenchmark;
+pub struct HumanEvalBenchmark;
+pub struct HumanEvalPlusBenchmark;
+pub struct MbppPlusBenchmark;
 
 const HUMANEVAL_PLUS_URL: &str = "https://github.com/evalplus/humanevalplus_release/releases/download/v0.1.10/HumanEvalPlus.jsonl.gz";
 const MBPP_PLUS_URL: &str =
@@ -22,7 +24,7 @@ const HUMAN_EVAL_URL: &str =
     "https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz";
 const DEFAULT_DOCKER_IMAGE: &str = "python:3.12";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskType {
     HumanEval,
     HumanEvalPlus,
@@ -83,6 +85,7 @@ struct CodingTask {
     #[serde(default)]
     atol: Option<f64>,
     #[serde(default)]
+    #[allow(dead_code)]
     assertion: Option<String>,
 }
 
@@ -225,11 +228,11 @@ impl super::Benchmark for CodingEvalBenchmark {
                     let solution = extract_code(&response);
                     let run_dir =
                         run_directory(&model.display_name, &taskset.name, &task.task_id, attempt);
-                    let harness = write_harness(&run_dir, task, &taskset.task_type, &solution)
-                        .with_context(|| format!("failed to write harness for {}", task.task_id))?;
-                    let docker_result = run_in_docker(
-                        &harness.test_path,
+                    let docker_result = evaluate_solution(
                         &run_dir,
+                        task,
+                        &taskset.task_type,
+                        &solution,
                         &docker_image,
                         cfg.timeout_secs,
                         cfg.host_repo_path.as_deref(),
@@ -339,6 +342,82 @@ impl super::Benchmark for CodingEvalBenchmark {
     }
 }
 
+impl super::Benchmark for HumanEvalBenchmark {
+    fn name(&self) -> &str {
+        "humaneval"
+    }
+
+    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+        let cfg = preset_config(config, "humaneval", TaskType::HumanEval);
+        CodingEvalBenchmark.pre_execute(&cfg)
+    }
+
+    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+        let cfg = preset_config(config, "humaneval", TaskType::HumanEval);
+        CodingEvalBenchmark.execute(model, &cfg)
+    }
+}
+
+impl super::Benchmark for HumanEvalPlusBenchmark {
+    fn name(&self) -> &str {
+        "humaneval_plus"
+    }
+
+    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+        let cfg = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
+        CodingEvalBenchmark.pre_execute(&cfg)
+    }
+
+    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+        let cfg = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
+        CodingEvalBenchmark.execute(model, &cfg)
+    }
+}
+
+impl super::Benchmark for MbppPlusBenchmark {
+    fn name(&self) -> &str {
+        "mbpp_plus"
+    }
+
+    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+        let cfg = preset_config(config, "mbpp_plus", TaskType::Mbpp);
+        CodingEvalBenchmark.pre_execute(&cfg)
+    }
+
+    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+        let cfg = preset_config(config, "mbpp_plus", TaskType::Mbpp);
+        CodingEvalBenchmark.execute(model, &cfg)
+    }
+}
+
+fn preset_config(config: &serde_yaml::Value, name: &str, task_type: TaskType) -> serde_yaml::Value {
+    let mut map = config
+        .as_mapping()
+        .cloned()
+        .unwrap_or_else(serde_yaml::Mapping::new);
+    if !map.contains_key(serde_yaml::Value::String("tasksets".to_string())) {
+        let mut taskset_map = serde_yaml::Mapping::new();
+        let mut task_cfg = serde_yaml::Mapping::new();
+        task_cfg.insert(
+            serde_yaml::Value::String("type".to_string()),
+            serde_yaml::Value::String(task_type.as_str().to_string()),
+        );
+        task_cfg.insert(
+            serde_yaml::Value::String("language".to_string()),
+            serde_yaml::Value::String("python".to_string()),
+        );
+        taskset_map.insert(
+            serde_yaml::Value::String(name.to_string()),
+            serde_yaml::Value::Mapping(task_cfg),
+        );
+        map.insert(
+            serde_yaml::Value::String("tasksets".to_string()),
+            serde_yaml::Value::Mapping(taskset_map),
+        );
+    }
+    serde_yaml::Value::Mapping(map)
+}
+
 #[derive(Debug, Clone)]
 struct TasksetStats {
     total: usize,
@@ -363,9 +442,24 @@ fn parse_config(config: &serde_yaml::Value) -> Result<CodingEvalConfig> {
         .get("num_samples")
         .and_then(|v| v.as_i64())
         .map(|n| n.max(0) as usize);
+    let docker_cfg = config.get("__docker");
+    if docker_cfg
+        .and_then(|docker| docker.get("enabled"))
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        return Err(anyhow::anyhow!(
+            "Docker is disabled, but coding benchmarks require Docker"
+        ));
+    }
     let timeout_secs = config
         .get("timeout_secs")
         .and_then(|v| v.as_i64())
+        .or_else(|| {
+            docker_cfg
+                .and_then(|docker| docker.get("default_timeout_secs"))
+                .and_then(|v| v.as_i64())
+        })
         .unwrap_or(8)
         .max(1) as u64;
     let enable_pass3 = config
@@ -380,6 +474,16 @@ fn parse_config(config: &serde_yaml::Value) -> Result<CodingEvalConfig> {
 
     let mut language_images = HashMap::new();
     language_images.insert("python".to_string(), DEFAULT_DOCKER_IMAGE.to_string());
+    if let Some(map) = docker_cfg
+        .and_then(|docker| docker.get("images"))
+        .and_then(|v| v.as_mapping())
+    {
+        for (k, v) in map {
+            if let (Some(lang), Some(image)) = (k.as_str(), v.as_str()) {
+                language_images.insert(lang.to_string(), image.to_string());
+            }
+        }
+    }
     if let Some(map) = config.get("language_images").and_then(|v| v.as_mapping()) {
         for (k, v) in map {
             if let (Some(lang), Some(image)) = (k.as_str(), v.as_str()) {
@@ -391,6 +495,11 @@ fn parse_config(config: &serde_yaml::Value) -> Result<CodingEvalConfig> {
     let host_repo_path = config
         .get("host_repo_path")
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            docker_cfg
+                .and_then(|docker| docker.get("host_repo_path"))
+                .and_then(|v| v.as_str())
+        })
         .map(PathBuf::from);
 
     let tasksets = if let Some(value) = config.get("tasksets") {
@@ -511,8 +620,18 @@ fn download_taskset(taskset: &TasksetConfig) -> Result<PathBuf> {
         return Ok(path);
     }
     println!("  Downloading coding_eval taskset {}...", taskset.name);
-    let bytes = reqwest::blocking::get(url)?.bytes()?;
-    fs::write(&path, bytes)?;
+    let bytes = reqwest::blocking::get(url)?.error_for_status()?.bytes()?;
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp.{}",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("download"),
+        std::process::id()
+    ));
+    fs::write(&tmp_path, bytes)?;
+    fs::rename(&tmp_path, &path).inspect_err(|_rename_err| {
+        let _ = fs::remove_file(&tmp_path);
+    })?;
     Ok(path)
 }
 
@@ -593,6 +712,51 @@ fn sanitize_path_component(value: &str) -> String {
         .collect()
 }
 
+fn evaluate_solution(
+    run_dir: &Path,
+    task: &CodingTask,
+    task_type: &TaskType,
+    solution: &str,
+    docker_image: &str,
+    timeout_secs: u64,
+    host_repo_path: Option<&Path>,
+) -> Result<DockerResult> {
+    match task_type {
+        TaskType::HumanEval => {
+            let harness = write_human_eval_files(run_dir, task, solution)
+                .with_context(|| format!("failed to write harness for {}", task.task_id))?;
+            run_in_docker(
+                &harness.test_path,
+                run_dir,
+                docker_image,
+                timeout_secs,
+                host_repo_path,
+            )
+        }
+        TaskType::HumanEvalPlus | TaskType::Mbpp => run_evalplus_oracle_safe(
+            run_dir,
+            task,
+            solution,
+            docker_image,
+            timeout_secs,
+            host_repo_path,
+        ),
+    }
+}
+
+fn write_human_eval_files(
+    run_dir: &Path,
+    task: &CodingTask,
+    solution: &str,
+) -> Result<HarnessFiles> {
+    fs::create_dir_all(run_dir)?;
+    fs::write(run_dir.join("solution.py"), solution)?;
+    let test_path = run_dir.join("test_solution.py");
+    fs::write(&test_path, build_human_eval_harness(task)?)?;
+    Ok(HarnessFiles { test_path })
+}
+
+#[allow(dead_code)]
 fn write_harness(
     run_dir: &Path,
     task: &CodingTask,
@@ -605,7 +769,11 @@ fn write_harness(
     let test_path = run_dir.join("test_solution.py");
     let test_content = match task_type {
         TaskType::HumanEval => build_human_eval_harness(task)?,
-        TaskType::HumanEvalPlus | TaskType::Mbpp => build_evalplus_harness(task, task_type)?,
+        TaskType::HumanEvalPlus | TaskType::Mbpp => {
+            return Err(anyhow::anyhow!(
+                "EvalPlus-style tasks must use oracle-separated evaluation"
+            ));
+        }
     };
     fs::write(&test_path, test_content)?;
     Ok(HarnessFiles { test_path })
@@ -635,7 +803,154 @@ if __name__ == "__main__":
     ))
 }
 
-fn build_evalplus_harness(task: &CodingTask, task_type: &TaskType) -> Result<String> {
+fn run_evalplus_oracle_safe(
+    run_dir: &Path,
+    task: &CodingTask,
+    solution: &str,
+    docker_image: &str,
+    timeout_secs: u64,
+    host_repo_path: Option<&Path>,
+) -> Result<DockerResult> {
+    let inputs: Vec<JsonValue> = task
+        .base_input
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(task.plus_input.clone().unwrap_or_default())
+        .collect();
+    fs::create_dir_all(run_dir)?;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if inputs.is_empty() {
+        return Ok(DockerResult {
+            passed: true,
+            timed_out: false,
+            exit_code: Some(0),
+            stdout: "PASS (no EvalPlus inputs)".to_string(),
+            stderr: String::new(),
+            error_summary: "passed".to_string(),
+        });
+    }
+
+    for (idx, args) in inputs.iter().enumerate() {
+        let case_dir = run_dir.join(format!("case_{idx}"));
+        let candidate_dir = case_dir.join("candidate");
+        let trusted_dir = case_dir.join("trusted");
+        fs::create_dir_all(&candidate_dir)?;
+        fs::create_dir_all(&trusted_dir)?;
+        fs::write(candidate_dir.join("solution.py"), solution)?;
+        fs::write(
+            candidate_dir.join("input.json"),
+            serde_json::to_string(args)?,
+        )?;
+        fs::write(
+            candidate_dir.join("candidate_driver.py"),
+            candidate_driver_source(&task.entry_point),
+        )?;
+
+        let candidate_result = run_in_docker(
+            &candidate_dir.join("candidate_driver.py"),
+            &candidate_dir,
+            docker_image,
+            timeout_secs,
+            host_repo_path,
+        )?;
+        stdout.push_str(&format!(
+            "case {idx} candidate stdout:\n{}\n",
+            candidate_result.stdout
+        ));
+        stderr.push_str(&format!(
+            "case {idx} candidate stderr:\n{}\n",
+            candidate_result.stderr
+        ));
+        if !candidate_result.passed {
+            return Ok(DockerResult {
+                passed: false,
+                timed_out: candidate_result.timed_out,
+                exit_code: candidate_result.exit_code,
+                stdout,
+                stderr,
+                error_summary: format!(
+                    "case {idx} candidate failed: {}",
+                    candidate_result.error_summary
+                ),
+            });
+        }
+
+        fs::write(trusted_dir.join("input.json"), serde_json::to_string(args)?)?;
+        fs::write(
+            trusted_dir.join("actual.json"),
+            candidate_result.stdout.trim(),
+        )?;
+        fs::write(
+            trusted_dir.join("compare.py"),
+            trusted_compare_source(task)?,
+        )?;
+        let compare_result = run_in_docker(
+            &trusted_dir.join("compare.py"),
+            &trusted_dir,
+            docker_image,
+            timeout_secs,
+            host_repo_path,
+        )?;
+        stdout.push_str(&format!(
+            "case {idx} compare stdout:\n{}\n",
+            compare_result.stdout
+        ));
+        stderr.push_str(&format!(
+            "case {idx} compare stderr:\n{}\n",
+            compare_result.stderr
+        ));
+        if !compare_result.passed {
+            return Ok(DockerResult {
+                passed: false,
+                timed_out: compare_result.timed_out,
+                exit_code: compare_result.exit_code,
+                stdout,
+                stderr,
+                error_summary: format!(
+                    "case {idx} comparison failed: {}",
+                    compare_result.error_summary
+                ),
+            });
+        }
+    }
+
+    Ok(DockerResult {
+        passed: true,
+        timed_out: false,
+        exit_code: Some(0),
+        stdout,
+        stderr,
+        error_summary: "passed".to_string(),
+    })
+}
+
+fn candidate_driver_source(entry_point: &str) -> String {
+    format!(
+        r#"import base64
+import json
+import pickle
+import traceback
+from solution import {entry} as candidate
+
+with open("input.json", "r", encoding="utf-8") as f:
+    args = json.load(f)
+if not isinstance(args, list):
+    args = [args]
+try:
+    result = candidate(*args)
+    print(json.dumps({{"ok": True, "pickle_b64": base64.b64encode(pickle.dumps(result)).decode("ascii")}}))
+except BaseException as exc:
+    traceback.print_exc()
+    print(json.dumps({{"ok": False, "error": repr(exc)}}))
+    raise
+"#,
+        entry = entry_point
+    )
+}
+
+fn trusted_compare_source(task: &CodingTask) -> Result<String> {
     let canonical = task.canonical_solution.as_ref().ok_or_else(|| {
         anyhow::anyhow!("EvalPlus task {} missing canonical_solution", task.task_id)
     })?;
@@ -644,26 +959,17 @@ fn build_evalplus_harness(task: &CodingTask, task_type: &TaskType) -> Result<Str
     } else {
         format!("{}\n{}", task.prompt, canonical)
     };
-    let base_input = serde_json::to_string(task.base_input.as_ref().unwrap_or(&Vec::new()))?;
-    let plus_input = serde_json::to_string(task.plus_input.as_ref().unwrap_or(&Vec::new()))?;
-    let assertion = task.assertion.clone().unwrap_or_default();
-    let run_assertion = matches!(task_type, TaskType::Mbpp) && !assertion.trim().is_empty();
-    let assertion_literal = serde_json::to_string(&assertion)?;
     Ok(format!(
-        r#"import copy
+        r#"import base64
 import json
 import math
+import pickle
 import traceback
 import types
-from solution import {entry} as candidate
 
 REFERENCE_SOURCE = {reference_source:?}
-BASE_INPUTS = json.loads({base_input:?})
-PLUS_INPUTS = json.loads({plus_input:?})
-ATOL = {atol}
-ASSERTION = json.loads({assertion_literal:?})
-RUN_ASSERTION = {run_assertion}
 ENTRY_POINT = {entry:?}
+ATOL = {atol}
 
 reference_module = types.ModuleType("reference_solution")
 exec(REFERENCE_SOURCE, reference_module.__dict__)
@@ -683,39 +989,26 @@ def equivalent(actual, expected, atol=0.0):
         return actual == expected
     return actual == expected
 
-def run_case(args):
+try:
+    with open("input.json", "r", encoding="utf-8") as f:
+        args = json.load(f)
     if not isinstance(args, list):
         args = [args]
-    cand_args = copy.deepcopy(args)
-    ref_args = copy.deepcopy(args)
-    actual = candidate(*cand_args)
-    expected = reference(*ref_args)
+    with open("actual.json", "r", encoding="utf-8") as f:
+        actual_payload = json.load(f)
+    if not actual_payload.get("ok"):
+        raise AssertionError(actual_payload.get("error", "candidate failed"))
+    actual = pickle.loads(base64.b64decode(actual_payload["pickle_b64"]))
+    expected = reference(*args)
     assert equivalent(actual, expected, ATOL), f"for args={{args!r}} expected {{expected!r}} got {{actual!r}}"
-
-def main():
-    if RUN_ASSERTION:
-        globals()[ENTRY_POINT] = candidate
-        exec(ASSERTION, globals())
-    for args in BASE_INPUTS:
-        run_case(args)
-    for args in PLUS_INPUTS:
-        run_case(args)
     print("PASS")
-
-if __name__ == "__main__":
-    try:
-        main()
-    except BaseException:
-        traceback.print_exc()
-        raise
+except BaseException:
+    traceback.print_exc()
+    raise
 "#,
-        entry = task.entry_point,
         reference_source = reference_source,
-        base_input = base_input,
-        plus_input = plus_input,
+        entry = task.entry_point,
         atol = task.atol.unwrap_or(0.0),
-        assertion_literal = assertion_literal,
-        run_assertion = if run_assertion { "True" } else { "False" },
     ))
 }
 
@@ -726,114 +1019,39 @@ fn run_in_docker(
     timeout_secs: u64,
     host_repo_path: Option<&Path>,
 ) -> Result<DockerResult> {
-    let host_task_dir = docker_mount_source(run_dir, host_repo_path)?;
-    let container_name = docker_container_name();
     let test_file = test_path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("test_solution.py");
-    let mut child = Command::new("docker")
-        .arg("run")
-        .arg("--rm")
-        .arg("--name")
-        .arg(&container_name)
-        .arg("--network")
-        .arg("none")
-        .arg("--read-only")
-        .arg("--tmpfs")
-        .arg("/tmp:rw,noexec,nosuid,size=64m")
-        .arg("--cap-drop=ALL")
-        .arg("--security-opt=no-new-privileges")
-        .arg("--pids-limit")
-        .arg("128")
-        .arg("--memory")
-        .arg("512m")
-        .arg("-v")
-        .arg(format!("{}:/work:ro", host_task_dir.display()))
-        .arg("-w")
-        .arg("/work")
-        .arg("-e")
-        .arg("PYTHONDONTWRITEBYTECODE=1")
-        .arg(docker_image)
-        .arg("python")
-        .arg(test_file)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| "failed to start docker; is Docker installed and available on PATH?")?;
-
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let passed = output.status.success();
-            let exit_code = output.status.code();
-            let error_summary = if passed {
-                "passed".to_string()
-            } else {
-                docker_error_summary(&stderr, host_repo_path.is_some())
-            };
-            return Ok(DockerResult {
-                passed,
-                timed_out: false,
-                exit_code,
-                stdout,
-                stderr,
-                error_summary,
-            });
-        }
-        if Instant::now() >= deadline {
-            let _ = Command::new("docker")
-                .arg("rm")
-                .arg("-f")
-                .arg(&container_name)
-                .output();
-            let _ = child.kill();
-            let output = child.wait_with_output()?;
-            return Ok(DockerResult {
-                passed: false,
-                timed_out: true,
-                exit_code: None,
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                error_summary: format!("timed out after {} seconds", timeout_secs),
-            });
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn docker_container_name() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!(
-        "llm-benchmark-runner-coding-eval-{}-{}",
-        std::process::id(),
-        nanos
-    )
-}
-
-fn docker_mount_source(run_dir: &Path, host_repo_path: Option<&Path>) -> Result<PathBuf> {
-    let canonical_run_dir = run_dir.canonicalize()?;
-    if let Some(host_repo_path) = host_repo_path {
-        let repo_root = std::env::current_dir()?.canonicalize()?;
-        let relative = canonical_run_dir
-            .strip_prefix(&repo_root)
-            .with_context(|| {
-                format!(
-                    "run dir {} is not under repo root {}; cannot apply host_repo_path",
-                    canonical_run_dir.display(),
-                    repo_root.display()
-                )
-            })?;
-        Ok(host_repo_path.join(relative))
+    let mut config = DockerRunConfig::new(
+        docker_image,
+        vec!["python".to_string(), test_file.to_string()],
+        timeout_secs,
+    );
+    config.mounts.push(DockerMount::readonly(run_dir, "/work"));
+    config.workdir = Some("/work".to_string());
+    config
+        .env
+        .push(("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string()));
+    config.host_repo_path = host_repo_path.map(Path::to_path_buf);
+    config.name_prefix = "llm-benchmark-runner-coding-eval".to_string();
+    let output = DockerRunner::run(&config)?;
+    let passed = output.success();
+    let error_summary = if output.timed_out {
+        format!("timed out after {} seconds", timeout_secs)
+    } else if passed {
+        "passed".to_string()
     } else {
-        Ok(canonical_run_dir)
-    }
+        docker_error_summary(&output.stderr, host_repo_path.is_some())
+    };
+    Ok(DockerResult {
+        passed,
+        timed_out: output.timed_out,
+        exit_code: output.exit_code,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        error_summary,
+    })
 }
 
 fn docker_error_summary(stderr: &str, host_repo_path_set: bool) -> String {
@@ -1005,7 +1223,16 @@ tasksets:
     }
 
     #[test]
-    fn evalplus_harness_compares_candidate_to_reference() {
+    fn evalplus_candidate_driver_does_not_embed_reference_or_expected_outputs() {
+        let driver = candidate_driver_source("f");
+        assert!(driver.contains("from solution import f as candidate"));
+        assert!(!driver.contains("REFERENCE_SOURCE"));
+        assert!(!driver.contains("reference ="));
+        assert!(!driver.contains("expected"));
+    }
+
+    #[test]
+    fn evalplus_reference_is_confined_to_trusted_compare_driver() {
         let task = CodingTask {
             task_id: "t".to_string(),
             prompt: "def f(x):\n    ".to_string(),
@@ -1017,10 +1244,10 @@ tasksets:
             atol: Some(0.0),
             assertion: None,
         };
-        let harness = build_evalplus_harness(&task, &TaskType::HumanEvalPlus).unwrap();
-        assert!(harness.contains("reference = getattr(reference_module, ENTRY_POINT)"));
-        assert!(harness.contains("run_case(args)"));
-        assert!(harness.contains("PLUS_INPUTS"));
+        let compare = trusted_compare_source(&task).unwrap();
+        assert!(compare.contains("REFERENCE_SOURCE"));
+        assert!(compare.contains("actual.json"));
+        assert!(!candidate_driver_source("f").contains(&task.canonical_solution.unwrap()));
     }
 
     #[test]

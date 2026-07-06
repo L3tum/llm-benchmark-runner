@@ -290,6 +290,29 @@
     </tbody>
   </table>
 
+  <h2>🧩 SWE-Bench</h2>
+  <table>
+    <thead>
+      <tr><th>Model / Benchmark</th><th>Dataset</th><th>Resolved</th><th>Resolution Rate</th><th>Harness Completed</th><th>Output Tokens</th><th>Thinking Tokens</th><th>Error</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in swe_bench_results.iter() %}
+      {% set model = entry.0 %}
+      {% set data = entry.1 %}
+      <tr class="{% if data.best %}best{% endif %}">
+        <td>{{ model }}</td>
+        <td>{{ data.dataset }}</td>
+        <td>{{ data.resolved }}/{{ data.total_questions }}</td>
+        <td>{{ data.resolution_rate_pct }}%</td>
+        <td>{{ data.harness_passed }}</td>
+        <td>{{ data.output_tokens }}</td>
+        <td>{{ data.thinking_tokens }}</td>
+        <td>{{ data.error_summary }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
   <h2>🔁 KLD (Kullback-Leibler Divergence)</h2>
   <p>Average KL divergence between model output distributions (lower = more similar).</p>
 

@@ -141,6 +141,20 @@ struct CodingEvalResult {
     best: bool,
 }
 
+#[derive(Serialize)]
+struct SweBenchResult {
+    dataset: String,
+    resolved: i64,
+    total_questions: i64,
+    resolution_rate: f64,
+    resolution_rate_pct: String,
+    harness_passed: bool,
+    error_summary: String,
+    output_tokens: String,
+    thinking_tokens: String,
+    best: bool,
+}
+
 pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Result<()> {
     let models_evaluated: Vec<String> = results
         .get("models")
@@ -154,6 +168,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
     let math500_results = extract_math500_results(results);
     let minebench_results = extract_minebench_results(results);
     let coding_eval_results = extract_coding_eval_results(results);
+    let swe_bench_results = extract_swe_bench_results(results);
     let token_usage_results = extract_token_usage_results(results);
     let kld_results = convert_kld_results(results);
 
@@ -164,6 +179,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         &math500_results,
         &minebench_results,
         &coding_eval_results,
+        &swe_bench_results,
         &kld_results,
     );
     let timestamp = chrono::Utc::now()
@@ -181,6 +197,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         math500_results: &math500_results,
         minebench_results: &minebench_results,
         coding_eval_results: &coding_eval_results,
+        swe_bench_results: &swe_bench_results,
         token_usage_results: &token_usage_results,
         kld_results: &kld_results.pairwise,
         avg_kld_to_others: &kld_results.avg_kld_to_others,
@@ -202,6 +219,7 @@ pub fn generate_reports(results: &serde_json::Value, output_dir: &Path) -> Resul
         &math500_results,
         &minebench_results,
         &coding_eval_results,
+        &swe_bench_results,
         &token_usage_results,
         &kld_results,
         &summary,
@@ -228,6 +246,7 @@ pub struct ReportTemplate<'a> {
     math500_results: &'a HashMap<String, Math500Result>,
     minebench_results: &'a HashMap<String, MinebenchResult>,
     coding_eval_results: &'a HashMap<String, CodingEvalResult>,
+    swe_bench_results: &'a HashMap<String, SweBenchResult>,
     token_usage_results: &'a HashMap<String, HashMap<String, TokenUsageResult>>,
     kld_results: &'a HashMap<String, KldPairResult>,
     avg_kld_to_others: &'a HashMap<String, KldAvgResult>,
@@ -556,126 +575,222 @@ fn extract_minebench_results(results: &serde_json::Value) -> HashMap<String, Min
 fn extract_coding_eval_results(results: &serde_json::Value) -> HashMap<String, CodingEvalResult> {
     let mut map = HashMap::new();
     let models = results.get("models").and_then(|v| v.as_object());
+    let is_coding_bench = |name: &str| {
+        matches!(
+            name,
+            "coding_eval" | "humaneval" | "humaneval_plus" | "mbpp_plus"
+        )
+    };
     let best_score = models.and_then(|models| {
-        models
-            .values()
-            .filter_map(|data| data.get("coding_eval"))
-            .filter_map(coding_eval_score)
+        let mut scores = Vec::new();
+        for data in models.values() {
+            if let Some(obj) = data.as_object() {
+                for (bench_name, value) in obj {
+                    if is_coding_bench(bench_name) {
+                        if let Some(score) = coding_eval_score(value) {
+                            scores.push(score);
+                        }
+                    }
+                }
+            }
+        }
+        scores
+            .into_iter()
             .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     });
 
     if let Some(models) = models {
         for (name, data) in models {
-            if let Some(coding) = data.get("coding_eval").and_then(|v| v.as_object()) {
-                let pass_at_1 = coding
-                    .get("pass_at_1")
+            let Some(obj) = data.as_object() else {
+                continue;
+            };
+            for (bench_name, value) in obj {
+                if !is_coding_bench(bench_name) {
+                    continue;
+                }
+                if let Some(coding) = value.as_object() {
+                    let pass_at_1 = coding
+                        .get("pass_at_1")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let pass_at_2 = coding.get("pass_at_2").and_then(|v| v.as_f64());
+                    let pass_at_3 = coding.get("pass_at_3").and_then(|v| v.as_f64());
+                    let pass_score = pass_at_3.or(pass_at_2).unwrap_or(pass_at_1);
+                    let passed = coding.get("passed").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let total_questions = coding
+                        .get("total_questions")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let timeout_count = coding
+                        .get("timeout_count")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let skipped_later_attempts = coding
+                        .get("skipped_later_attempts")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let results_by_taskset = coding
+                        .get("results_by_taskset")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter()
+                                .filter_map(|(taskset, val)| {
+                                    val.as_object().map(|row| {
+                                        let p1 = row
+                                            .get("pass_at_1")
+                                            .and_then(|v| v.as_f64())
+                                            .unwrap_or(0.0);
+                                        let p2 = row.get("pass_at_2").and_then(|v| v.as_f64());
+                                        let p3 = row.get("pass_at_3").and_then(|v| v.as_f64());
+                                        (
+                                            taskset.clone(),
+                                            CodingEvalTasksetResult {
+                                                pass_at_1_pct: pct(p1),
+                                                pass_at_2_pct: p2
+                                                    .map(pct)
+                                                    .unwrap_or_else(|| "–".to_string()),
+                                                pass_at_3_pct: p3
+                                                    .map(pct)
+                                                    .unwrap_or_else(|| "–".to_string()),
+                                                passed: row
+                                                    .get("passed")
+                                                    .and_then(|v| v.as_i64())
+                                                    .unwrap_or(0),
+                                                total: row
+                                                    .get("total")
+                                                    .and_then(|v| v.as_i64())
+                                                    .unwrap_or(0),
+                                                timeout_count: row
+                                                    .get("timeout_count")
+                                                    .and_then(|v| v.as_i64())
+                                                    .unwrap_or(0),
+                                                skipped_later_attempts: row
+                                                    .get("skipped_later_attempts")
+                                                    .and_then(|v| v.as_i64())
+                                                    .unwrap_or(0),
+                                            },
+                                        )
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let failures = coding
+                        .get("tasks")
+                        .and_then(|v| v.as_array())
+                        .map(|tasks| {
+                            tasks
+                                .iter()
+                                .filter(|task| {
+                                    !task
+                                        .get("passed")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false)
+                                })
+                                .filter_map(|task| {
+                                    Some(CodingEvalFailure {
+                                        taskset: task.get("taskset")?.as_str()?.to_string(),
+                                        task_id: task.get("task_id")?.as_str()?.to_string(),
+                                        entry_point: task
+                                            .get("entry_point")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        error_summary: last_attempt_error(task),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let display_name = if bench_name == "coding_eval" {
+                        name.clone()
+                    } else {
+                        format!("{} / {}", name, bench_name)
+                    };
+                    map.insert(
+                        display_name,
+                        CodingEvalResult {
+                            pass_score,
+                            pass_at_1_pct: pct(pass_at_1),
+                            pass_at_2_pct: pass_at_2.map(pct).unwrap_or_else(|| "–".to_string()),
+                            pass_at_3_pct: pass_at_3.map(pct).unwrap_or_else(|| "–".to_string()),
+                            passed,
+                            total_questions,
+                            timeout_count,
+                            skipped_later_attempts,
+                            output_tokens: format_optional_u64(coding.get("output_tokens")),
+                            thinking_tokens: format_optional_u64(coding.get("thinking_tokens")),
+                            results_by_taskset,
+                            failures,
+                            best: best_score == Some(pass_score),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    map
+}
+
+fn extract_swe_bench_results(results: &serde_json::Value) -> HashMap<String, SweBenchResult> {
+    let mut map = HashMap::new();
+    let models = results.get("models").and_then(|v| v.as_object());
+    let best_rate = models.and_then(|models| {
+        models
+            .values()
+            .flat_map(|data| {
+                data.as_object()
+                    .into_iter()
+                    .flat_map(|obj| obj.iter())
+                    .filter(|(name, _)| name.starts_with("swebench"))
+                    .filter_map(|(_, value)| value.get("resolution_rate").and_then(|v| v.as_f64()))
+                    .collect::<Vec<_>>()
+            })
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    if let Some(models) = models {
+        for (model_name, data) in models {
+            let Some(obj) = data.as_object() else {
+                continue;
+            };
+            for (bench_name, value) in obj {
+                if !bench_name.starts_with("swebench") {
+                    continue;
+                }
+                let Some(swe) = value.as_object() else {
+                    continue;
+                };
+                let rate = swe
+                    .get("resolution_rate")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
-                let pass_at_2 = coding.get("pass_at_2").and_then(|v| v.as_f64());
-                let pass_at_3 = coding.get("pass_at_3").and_then(|v| v.as_f64());
-                let pass_score = pass_at_3.or(pass_at_2).unwrap_or(pass_at_1);
-                let passed = coding.get("passed").and_then(|v| v.as_i64()).unwrap_or(0);
-                let total_questions = coding
-                    .get("total_questions")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let timeout_count = coding
-                    .get("timeout_count")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let skipped_later_attempts = coding
-                    .get("skipped_later_attempts")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let results_by_taskset = coding
-                    .get("results_by_taskset")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter()
-                            .filter_map(|(taskset, val)| {
-                                val.as_object().map(|row| {
-                                    let p1 = row
-                                        .get("pass_at_1")
-                                        .and_then(|v| v.as_f64())
-                                        .unwrap_or(0.0);
-                                    let p2 = row.get("pass_at_2").and_then(|v| v.as_f64());
-                                    let p3 = row.get("pass_at_3").and_then(|v| v.as_f64());
-                                    (
-                                        taskset.clone(),
-                                        CodingEvalTasksetResult {
-                                            pass_at_1_pct: pct(p1),
-                                            pass_at_2_pct: p2
-                                                .map(pct)
-                                                .unwrap_or_else(|| "–".to_string()),
-                                            pass_at_3_pct: p3
-                                                .map(pct)
-                                                .unwrap_or_else(|| "–".to_string()),
-                                            passed: row
-                                                .get("passed")
-                                                .and_then(|v| v.as_i64())
-                                                .unwrap_or(0),
-                                            total: row
-                                                .get("total")
-                                                .and_then(|v| v.as_i64())
-                                                .unwrap_or(0),
-                                            timeout_count: row
-                                                .get("timeout_count")
-                                                .and_then(|v| v.as_i64())
-                                                .unwrap_or(0),
-                                            skipped_later_attempts: row
-                                                .get("skipped_later_attempts")
-                                                .and_then(|v| v.as_i64())
-                                                .unwrap_or(0),
-                                        },
-                                    )
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let failures = coding
-                    .get("tasks")
-                    .and_then(|v| v.as_array())
-                    .map(|tasks| {
-                        tasks
-                            .iter()
-                            .filter(|task| {
-                                !task
-                                    .get("passed")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false)
-                            })
-                            .filter_map(|task| {
-                                Some(CodingEvalFailure {
-                                    taskset: task.get("taskset")?.as_str()?.to_string(),
-                                    task_id: task.get("task_id")?.as_str()?.to_string(),
-                                    entry_point: task
-                                        .get("entry_point")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    error_summary: last_attempt_error(task),
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 map.insert(
-                    name.clone(),
-                    CodingEvalResult {
-                        pass_score,
-                        pass_at_1_pct: pct(pass_at_1),
-                        pass_at_2_pct: pass_at_2.map(pct).unwrap_or_else(|| "–".to_string()),
-                        pass_at_3_pct: pass_at_3.map(pct).unwrap_or_else(|| "–".to_string()),
-                        passed,
-                        total_questions,
-                        timeout_count,
-                        skipped_later_attempts,
-                        output_tokens: format_optional_u64(coding.get("output_tokens")),
-                        thinking_tokens: format_optional_u64(coding.get("thinking_tokens")),
-                        results_by_taskset,
-                        failures,
-                        best: best_score == Some(pass_score),
+                    format!("{} / {}", model_name, bench_name),
+                    SweBenchResult {
+                        dataset: swe
+                            .get("dataset")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(bench_name)
+                            .to_string(),
+                        resolved: swe.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0),
+                        total_questions: swe
+                            .get("total_questions")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0),
+                        resolution_rate: rate,
+                        resolution_rate_pct: pct(rate),
+                        harness_passed: swe
+                            .get("harness_passed")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        error_summary: swe
+                            .get("error_summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        output_tokens: format_optional_u64(swe.get("output_tokens")),
+                        thinking_tokens: format_optional_u64(swe.get("thinking_tokens")),
+                        best: best_rate == Some(rate),
                     },
                 );
             }
@@ -853,6 +968,7 @@ fn convert_kld_results(results: &serde_json::Value) -> KldResults {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_summary(
     mmlu_pro_results: &HashMap<String, MmluProResult>,
     gpqa_results: &HashMap<String, GpqaResult>,
@@ -860,6 +976,7 @@ fn generate_summary(
     math500_results: &HashMap<String, Math500Result>,
     minebench_results: &HashMap<String, MinebenchResult>,
     coding_eval_results: &HashMap<String, CodingEvalResult>,
+    swe_bench_results: &HashMap<String, SweBenchResult>,
     kld_results: &KldResults,
 ) -> Vec<String> {
     let mut summary = Vec::new();
@@ -947,6 +1064,22 @@ fn generate_summary(
         ));
     }
 
+    if let Some((model, data)) = swe_bench_results
+        .iter()
+        .max_by(|(_a, a_data), (_b, b_data)| {
+            a_data
+                .resolution_rate
+                .partial_cmp(&b_data.resolution_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    {
+        summary.push(format!(
+            "Highest SWE-Bench resolution: {} ({:.1}%)",
+            model,
+            data.resolution_rate * 100.0
+        ));
+    }
+
     // KLD summary
     if let Some((model, data)) =
         kld_results
@@ -983,6 +1116,7 @@ fn generate_markdown_report(
     math500_results: &HashMap<String, Math500Result>,
     minebench_results: &HashMap<String, MinebenchResult>,
     coding_eval_results: &HashMap<String, CodingEvalResult>,
+    swe_bench_results: &HashMap<String, SweBenchResult>,
     token_usage_results: &HashMap<String, HashMap<String, TokenUsageResult>>,
     kld_results: &KldResults,
     summary: &[String],
@@ -1172,6 +1306,25 @@ fn generate_markdown_report(
                     escape_md_cell(&failure.error_summary)
                 ));
             }
+        }
+    }
+
+    // SWE-Bench
+    if !swe_bench_results.is_empty() {
+        md.push_str("\n## SWE-Bench (higher is better)\n\n| Model / Benchmark | Dataset | Resolved | Resolution Rate | Harness Completed | Output Tokens | Thinking Tokens | Error |\n|-------------------|---------|----------|-----------------|-------------------|---------------|-----------------|-------|\n");
+        for (model, data) in swe_bench_results {
+            md.push_str(&format!(
+                "| {} | {} | {}/{} | {}% | {} | {} | {} | {} |\n",
+                model,
+                data.dataset,
+                data.resolved,
+                data.total_questions,
+                data.resolution_rate_pct,
+                data.harness_passed,
+                data.output_tokens,
+                data.thinking_tokens,
+                escape_md_cell(&data.error_summary)
+            ));
         }
     }
 

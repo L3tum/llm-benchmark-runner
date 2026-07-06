@@ -1,6 +1,7 @@
 mod benchmarks;
 mod client;
 mod config;
+mod docker_runner;
 mod report;
 mod runner;
 mod utils;
@@ -102,11 +103,14 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
 
     // Pre-execute
     for bench_name in &benchmarks {
-        let bench_cfg = config
-            .benchmark
-            .get(bench_name)
-            .cloned()
-            .unwrap_or(serde_yaml::Value::Null);
+        let bench_cfg = config::attach_docker_config(
+            config
+                .benchmark
+                .get(bench_name)
+                .cloned()
+                .unwrap_or(serde_yaml::Value::Null),
+            &config.docker,
+        );
         if let Err(e) = benchmarks::pre_execute_benchmark(bench_name, &bench_cfg) {
             eprintln!("Warning: pre-execute {} failed: {}", bench_name, e);
         }
@@ -145,6 +149,7 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             model,
             &benchmarks_to_run,
             &config.benchmark,
+            &config.docker,
             &model_completed_benchmarks,
         )?;
         // Merge per-model timings into global map
@@ -293,10 +298,11 @@ fn test_models(config_path: &str) -> Result<()> {
             }
         };
 
+        let mut process_guard = runner::ModelProcessGuard::new(process, model.cmd_stop.clone());
+
         let client = match client::Client::new(&model.proxy) {
             Ok(c) => c,
             Err(e) => {
-                runner::stop_model(&model.cmd_stop, process);
                 eprintln!("  FAIL: Failed to create client: {}", e);
                 results.push((
                     model.display_name.clone(),
@@ -308,7 +314,6 @@ fn test_models(config_path: &str) -> Result<()> {
         };
 
         if !runner::wait_for_health(&client) {
-            runner::stop_model(&model.cmd_stop, process);
             eprintln!("  FAIL: Model proxy did not become healthy");
             results.push((
                 model.display_name.clone(),
@@ -350,7 +355,7 @@ fn test_models(config_path: &str) -> Result<()> {
         }
 
         println!("  Stopping model: {}", model.display_name);
-        runner::stop_model(&model.cmd_stop, process);
+        process_guard.stop();
     }
 
     // Print summary

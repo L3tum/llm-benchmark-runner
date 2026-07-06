@@ -11,7 +11,20 @@ benchmarks:
   - aime
   - math500
   - minebench
-  # - coding_eval
+  # - humaneval_plus
+  # - swebench_verified
+
+docker:
+  enabled: true
+  default_timeout_secs: 8
+  images:
+    python: python:3.12
+    swebench_harness: llm-benchmark-runner/swebench-harness:latest
+  build_images: true
+  max_workers: 1
+  mount_docker_socket: true
+  docker_socket_path: /var/run/docker.sock
+  # host_repo_path: /host/path/to/llm-benchmark-runner
 
 benchmark:
   mmlu_pro:
@@ -34,13 +47,17 @@ benchmark:
     buildings: [castle, dragon, train]
     # Optional legacy/custom single prompt:
     # build: "A compact test castle"
-  coding_eval:
-    tasksets:
-      humaneval_plus: ~
+  humaneval_plus:
     num_samples: 1
     timeout_secs: 8
     enable_pass2: false
     enable_pass3: false
-    language_images:
-      python: python:3.12
-    # host_repo_path: /host/path/to/llm-benchmark-runner
+  swebench_verified:
+    num_samples: 1
+    split: test
+    timeout_secs: 1800
+  coding_eval:
+    # Backwards-compatible umbrella config shape.
+    tasksets:
+      humaneval_plus: ~
+    num_samples: 1

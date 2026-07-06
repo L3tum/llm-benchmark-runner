@@ -1,6 +1,6 @@
 use crate::benchmarks;
 use crate::client::Client;
-use crate::config::Model;
+use crate::config::{self, DockerConfig, Model};
 use crate::utils::format_duration;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -17,6 +17,7 @@ pub fn run_model(
     model: &Model,
     benchmarks: &[String],
     benchmark_config: &HashMap<String, serde_yaml::Value>,
+    docker_config: &DockerConfig,
     completed_benchmarks: &[String],
 ) -> Result<(
     serde_json::Value,
@@ -26,10 +27,10 @@ pub fn run_model(
 )> {
     println!("\n  Starting model: {}", model.display_name);
     let process = start_model(&model.cmd)?;
+    let mut process_guard = ModelProcessGuard::new(process, model.cmd_stop.clone());
 
     let client = Client::new(&model.proxy)?;
     if !wait_for_health(&client) {
-        stop_model(&model.cmd_stop, process);
         return Err(anyhow::anyhow!("Proxy did not become healthy"));
     }
 
@@ -44,10 +45,13 @@ pub fn run_model(
     for (idx, bench_name) in benchmarks.iter().enumerate() {
         let bench_start = Instant::now();
 
-        let bench_cfg = benchmark_config
-            .get(bench_name)
-            .cloned()
-            .unwrap_or(serde_yaml::Value::Null);
+        let bench_cfg = config::attach_docker_config(
+            benchmark_config
+                .get(bench_name)
+                .cloned()
+                .unwrap_or(serde_yaml::Value::Null),
+            docker_config,
+        );
         match benchmarks::execute_benchmark(bench_name, model, &bench_cfg) {
             Ok(result) => {
                 model_results.insert(bench_name.to_string(), result);
@@ -100,7 +104,7 @@ pub fn run_model(
     }
 
     println!("  Stopping model: {}", model.display_name);
-    stop_model(&model.cmd_stop, process);
+    process_guard.stop();
 
     Ok((
         serde_json::json!(model_results),
@@ -137,6 +141,32 @@ pub fn start_model(cmd: &str) -> Result<Child> {
         .spawn()?;
     Ok(process)
 }
+pub struct ModelProcessGuard {
+    cmd_stop: Option<String>,
+    process: Option<Child>,
+}
+
+impl ModelProcessGuard {
+    pub fn new(process: Child, cmd_stop: Option<String>) -> Self {
+        Self {
+            cmd_stop,
+            process: Some(process),
+        }
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(process) = self.process.take() {
+            stop_model(&self.cmd_stop, process);
+        }
+    }
+}
+
+impl Drop for ModelProcessGuard {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub fn wait_for_health(client: &Client) -> bool {
     let timeout = Duration::from_secs(120);
     let poll = Duration::from_secs(2);
