@@ -5,9 +5,47 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
+
+/// Ordered list of category names for display (includes reserved empty categories).
+static CATEGORY_ORDER: OnceLock<Vec<String>> = OnceLock::new();
+
+fn get_category_order() -> &'static Vec<String> {
+    CATEGORY_ORDER.get_or_init(|| {
+        vec![
+            "Knowledge".to_string(),
+            "Math".to_string(),
+            "Short-Context-Coding".to_string(),
+            "Long-Context-Coding".to_string(),
+            "Creative".to_string(),
+            "Reasoning".to_string(),
+            "Research".to_string(),
+            "Similarity".to_string(),
+        ]
+    })
+}
+
+fn slugify_name(name: String) -> String {
+    name.to_lowercase()
+        .replace(" ", "-")
+        .replace("/", "-")
+        .replace("_", "-")
+        .replace("  ", "-")
+        .trim()
+        .to_string()
+}
+
+/// Per-subject result breakdown
+#[derive(Serialize, Clone)]
+struct SubjectResult {
+    acc: f64,
+    acc_pct: String,
+    correct: i64,
+    wrong: i64,
+}
 
 /// Strongly-typed MMLU-Pro result for template
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct MmluProResult {
     accuracy: f64,
     accuracy_pct: String, // pre-rounded
@@ -19,7 +57,7 @@ struct MmluProResult {
 }
 
 /// Strongly-typed GPQA Diamond result (per-category accuracy)
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct GpqaResult {
     accuracy: f64,
     accuracy_pct: String,
@@ -31,19 +69,19 @@ struct GpqaResult {
 }
 
 /// Strongly-typed AIME result (overall count correct)
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct AimeResult {
     accuracy: f64,
     accuracy_pct: String,
     total_questions: i64,
-    correct: i64,
     output_tokens: String,
     thinking_tokens: String,
+    correct: i64,
     best: bool,
 }
 
-/// Strongly-typed MATH-500 result (per-subject accuracy)
-#[derive(Serialize)]
+/// Strongly-typed MATH-500 result
+#[derive(Serialize, Clone)]
 struct Math500Result {
     accuracy: f64,
     accuracy_pct: String,
@@ -54,48 +92,28 @@ struct Math500Result {
     best: bool,
 }
 
-#[derive(Serialize)]
-struct SubjectResult {
-    acc: f64,
-    acc_pct: String, // pre-rounded
-    corr: i64,
-    wrong: i64,
-}
-
-/// Strongly-typed KLD pairwise result
-#[derive(Serialize)]
+/// KLD pairwise result
+#[derive(Serialize, Clone)]
 struct KldPairResult {
     models: Vec<String>,
     avg_kld: f64,
-    avg_kld_str: String, // pre-rounded
+    avg_kld_str: String,
     num_prompts_evaluated: i64,
 }
 
-/// Strongly-typed average KLD to others result
-#[derive(Serialize)]
+/// KLD average-to-others result
+#[derive(Serialize, Clone)]
 struct KldAvgResult {
+    klds: Vec<f64>,
     avg_kld_to_others: f64,
-    avg_kld_to_others_str: String, // pre-rounded
+    avg_kld_to_others_str: String,
     output_tokens: String,
     thinking_tokens: String,
-    klds: Vec<f64>,
     best: bool,
 }
 
-/// Container for all KLD results
-#[derive(Serialize)]
-struct KldResults {
-    pairwise: HashMap<String, KldPairResult>,
-    avg_kld_to_others: HashMap<String, KldAvgResult>,
-}
-
-#[derive(Serialize)]
-struct TokenUsageResult {
-    output_tokens: String,
-    thinking_tokens: String,
-}
-
-#[derive(Serialize)]
+/// Strongly-typed Minebench result for template
+#[derive(Serialize, Clone)]
 struct MinebenchResult {
     json_valid: bool,
     json_valid_str: String,
@@ -106,7 +124,17 @@ struct MinebenchResult {
     thinking_tokens: String,
 }
 
-#[derive(Serialize)]
+/// Failure summary for a coding eval task
+#[derive(Serialize, Clone)]
+struct FailureResult {
+    taskset: String,
+    task_id: String,
+    entry_point: String,
+    error_summary: String,
+}
+
+/// Coding eval taskset-level result
+#[derive(Serialize, Clone)]
 struct CodingEvalTasksetResult {
     pass_at_1_pct: String,
     pass_at_2_pct: String,
@@ -117,15 +145,8 @@ struct CodingEvalTasksetResult {
     skipped_later_attempts: i64,
 }
 
-#[derive(Serialize)]
-struct CodingEvalFailure {
-    taskset: String,
-    task_id: String,
-    entry_point: String,
-    error_summary: String,
-}
-
-#[derive(Serialize)]
+/// Strongly-typed Coding Eval result for template
+#[derive(Serialize, Clone)]
 struct CodingEvalResult {
     pass_score: f64,
     pass_at_1_pct: String,
@@ -138,21 +159,22 @@ struct CodingEvalResult {
     output_tokens: String,
     thinking_tokens: String,
     results_by_taskset: HashMap<String, CodingEvalTasksetResult>,
-    failures: Vec<CodingEvalFailure>,
+    failures: Vec<FailureResult>,
     best: bool,
 }
 
-#[derive(Serialize)]
+/// Strongly-typed SWE-Bench result
+#[derive(Serialize, Clone)]
 struct SweBenchResult {
     dataset: String,
     resolved: i64,
     total_questions: i64,
     resolution_rate: f64,
     resolution_rate_pct: String,
-    harness_passed: bool,
-    error_summary: String,
     output_tokens: String,
     thinking_tokens: String,
+    harness_passed: bool,
+    error_summary: String,
     best: bool,
 }
 
@@ -256,6 +278,210 @@ pub fn filter_comparison_results(
     })
 }
 
+/// Helper to build category data for the given results.
+/// All KLD results (pairwise and avg)
+#[derive(Serialize, Clone)]
+struct KldResults {
+    pairwise: HashMap<String, KldPairResult>,
+    avg_kld_to_others: HashMap<String, KldAvgResult>,
+}
+
+/// Category data for tabbed interface
+#[derive(Serialize, Clone)]
+struct CategoryData {
+    name: String,
+    name_slug: String,
+    has_results: bool,
+    mmlu_pro_results: Vec<(String, MmluProResult)>,
+    gpqa_results: Vec<(String, GpqaResult)>,
+    aime_results: Vec<(String, AimeResult)>,
+    math500_results: Vec<(String, Math500Result)>,
+    minebench_results: Vec<(String, MinebenchResult)>,
+    coding_eval_results: Vec<(String, CodingEvalResult)>,
+    swe_bench_results: Vec<(String, SweBenchResult)>,
+    kld_results: Vec<KldPairResult>,
+    avg_kld_to_others: Vec<(String, KldAvgResult)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_category_data(
+    mmlu_pro_results: &HashMap<String, MmluProResult>,
+    gpqa_results: &HashMap<String, GpqaResult>,
+    aime_results: &HashMap<String, AimeResult>,
+    math500_results: &HashMap<String, Math500Result>,
+    minebench_results: &HashMap<String, MinebenchResult>,
+    coding_eval_results: &HashMap<String, CodingEvalResult>,
+    swe_bench_results: &HashMap<String, SweBenchResult>,
+    kld_results: &KldResults,
+) -> Vec<CategoryData> {
+    // Knowledge: mmlu_pro and gpqa
+    let knowledge_mmlu: Vec<(String, MmluProResult)> = mmlu_pro_results
+        .iter()
+        .map(|(model, data)| (model.clone(), data.clone()))
+        .collect();
+    let knowledge_gpqa: Vec<(String, GpqaResult)> = gpqa_results
+        .iter()
+        .map(|(model, data)| (model.clone(), data.clone()))
+        .collect();
+
+    // Math: aime and math500
+    let math_aime: Vec<(String, AimeResult)> = aime_results
+        .iter()
+        .map(|(model, data)| (model.clone(), data.clone()))
+        .collect();
+    let math_math500: Vec<(String, Math500Result)> = math500_results
+        .iter()
+        .map(|(model, data)| (model.clone(), data.clone()))
+        .collect();
+
+    // Creative: minebench
+    let creative_minebench: Vec<(String, MinebenchResult)> = minebench_results
+        .iter()
+        .map(|(model, data)| (model.clone(), data.clone()))
+        .collect();
+
+    // Coding: coding_eval_results are short-context coding (Humaneval, MBPP, etc.)
+    let short_coding: Vec<(String, CodingEvalResult)> = coding_eval_results
+        .iter()
+        .map(|(key, data)| (key.clone(), data.clone()))
+        .collect();
+    // Long-context coding: swe_bench_results
+    let long_coding: Vec<(String, SweBenchResult)> = swe_bench_results
+        .iter()
+        .map(|(key, data)| (key.clone(), data.clone()))
+        .collect();
+
+    // Similarity: kld pairwise and avg
+    let similarity_kld_pair: Vec<KldPairResult> = kld_results.pairwise.values().cloned().collect();
+    let similarity_kld_avg: Vec<(String, KldAvgResult)> = kld_results
+        .avg_kld_to_others
+        .iter()
+        .map(|(model, data)| (model.clone(), data.clone()))
+        .collect();
+
+    // Helper to check if category has results
+    let has_results_for = |cat: &CategoryData| {
+        !cat.mmlu_pro_results.is_empty()
+            || !cat.gpqa_results.is_empty()
+            || !cat.aime_results.is_empty()
+            || !cat.math500_results.is_empty()
+            || !cat.minebench_results.is_empty()
+            || !cat.coding_eval_results.is_empty()
+            || !cat.swe_bench_results.is_empty()
+            || !cat.kld_results.is_empty()
+            || !cat.avg_kld_to_others.is_empty()
+    };
+
+    let categories = get_category_order();
+    categories
+        .iter()
+        .map(|name| {
+            let cat = match name.as_str() {
+                "Knowledge" => CategoryData {
+                    name: name.clone(),
+                    name_slug: slugify_name(name.clone()),
+                    mmlu_pro_results: knowledge_mmlu.clone(),
+                    gpqa_results: knowledge_gpqa.clone(),
+                    aime_results: vec![],
+                    math500_results: vec![],
+                    minebench_results: vec![],
+                    coding_eval_results: vec![],
+                    swe_bench_results: vec![],
+                    kld_results: vec![],
+                    avg_kld_to_others: vec![],
+                    has_results: false,
+                },
+                "Math" => CategoryData {
+                    name: name.clone(),
+                    name_slug: slugify_name(name.clone()),
+                    mmlu_pro_results: vec![],
+                    gpqa_results: vec![],
+                    aime_results: math_aime.clone(),
+                    math500_results: math_math500.clone(),
+                    minebench_results: vec![],
+                    coding_eval_results: vec![],
+                    swe_bench_results: vec![],
+                    kld_results: vec![],
+                    avg_kld_to_others: vec![],
+                    has_results: false,
+                },
+                "Short-Context-Coding" => CategoryData {
+                    name: name.clone(),
+                    name_slug: slugify_name(name.clone()),
+                    mmlu_pro_results: vec![],
+                    gpqa_results: vec![],
+                    aime_results: vec![],
+                    math500_results: vec![],
+                    minebench_results: vec![],
+                    coding_eval_results: short_coding.clone(),
+                    swe_bench_results: vec![],
+                    kld_results: vec![],
+                    avg_kld_to_others: vec![],
+                    has_results: false,
+                },
+                "Long-Context-Coding" => CategoryData {
+                    name: name.clone(),
+                    name_slug: slugify_name(name.clone()),
+                    mmlu_pro_results: vec![],
+                    gpqa_results: vec![],
+                    aime_results: vec![],
+                    math500_results: vec![],
+                    minebench_results: vec![],
+                    coding_eval_results: vec![],
+                    swe_bench_results: long_coding.clone(),
+                    kld_results: vec![],
+                    avg_kld_to_others: vec![],
+                    has_results: false,
+                },
+                "Creative" => CategoryData {
+                    name: name.clone(),
+                    name_slug: slugify_name(name.clone()),
+                    mmlu_pro_results: vec![],
+                    gpqa_results: vec![],
+                    aime_results: vec![],
+                    math500_results: vec![],
+                    minebench_results: creative_minebench.clone(),
+                    coding_eval_results: vec![],
+                    swe_bench_results: vec![],
+                    kld_results: vec![],
+                    avg_kld_to_others: vec![],
+                    has_results: false,
+                },
+                "Similarity" => CategoryData {
+                    name: name.clone(),
+                    name_slug: slugify_name(name.clone()),
+                    mmlu_pro_results: vec![],
+                    gpqa_results: vec![],
+                    aime_results: vec![],
+                    math500_results: vec![],
+                    minebench_results: vec![],
+                    coding_eval_results: vec![],
+                    swe_bench_results: vec![],
+                    kld_results: similarity_kld_pair.clone(),
+                    avg_kld_to_others: similarity_kld_avg.clone(),
+                    has_results: false,
+                },
+                // Reasoning and Research are reserved/empty
+                _ => CategoryData {
+                    name: name.clone(),
+                    name_slug: slugify_name(name.clone()),
+                    mmlu_pro_results: vec![],
+                    gpqa_results: vec![],
+                    aime_results: vec![],
+                    math500_results: vec![],
+                    minebench_results: vec![],
+                    coding_eval_results: vec![],
+                    swe_bench_results: vec![],
+                    kld_results: vec![],
+                    avg_kld_to_others: vec![],
+                    has_results: false,
+                },
+            };
+            let has_results = has_results_for(&cat);
+            CategoryData { has_results, ..cat }
+        })
+        .collect()
+}
 fn render_report_html(results: &serde_json::Value) -> Result<String> {
     let models_evaluated: Vec<String> = results
         .get("models")
@@ -288,20 +514,25 @@ fn render_report_html(results: &serde_json::Value) -> Result<String> {
         .to_string();
 
     let models_evaluated_str = models_evaluated.join(", ");
+
+    // Build category data for the template
+    let category_data = build_category_data(
+        &mmlu_pro_results,
+        &gpqa_results,
+        &aime_results,
+        &math500_results,
+        &minebench_results,
+        &coding_eval_results,
+        &swe_bench_results,
+        &kld_results,
+    );
+
     ReportTemplate {
         timestamp: &timestamp,
         models_evaluated: &models_evaluated_str,
-        mmlu_pro_results: &mmlu_pro_results,
-        gpqa_results: &gpqa_results,
-        aime_results: &aime_results,
-        math500_results: &math500_results,
-        minebench_results: &minebench_results,
-        coding_eval_results: &coding_eval_results,
-        swe_bench_results: &swe_bench_results,
         token_usage_results: &token_usage_results,
-        kld_results: &kld_results.pairwise,
-        avg_kld_to_others: &kld_results.avg_kld_to_others,
         summary: &summary,
+        category_data: &category_data,
     }
     .render()
     .map_err(|e| anyhow::anyhow!("Template rendering error: {}", e))
@@ -389,21 +620,20 @@ pub fn generate_reports(
     Ok(())
 }
 
+/// Token usage result for a model/benchmark combination
+#[derive(Serialize, Clone)]
+struct TokenUsageResult {
+    output_tokens: String,
+    thinking_tokens: String,
+}
+
 #[derive(Template)]
 #[template(path = "report.html", escape = "html")]
 pub struct ReportTemplate<'a> {
     timestamp: &'a str,
     models_evaluated: &'a str, // pre-joined comma-separated
-    mmlu_pro_results: &'a HashMap<String, MmluProResult>,
-    gpqa_results: &'a HashMap<String, GpqaResult>,
-    aime_results: &'a HashMap<String, AimeResult>,
-    math500_results: &'a HashMap<String, Math500Result>,
-    minebench_results: &'a HashMap<String, MinebenchResult>,
-    coding_eval_results: &'a HashMap<String, CodingEvalResult>,
-    swe_bench_results: &'a HashMap<String, SweBenchResult>,
     token_usage_results: &'a HashMap<String, HashMap<String, TokenUsageResult>>,
-    kld_results: &'a HashMap<String, KldPairResult>,
-    avg_kld_to_others: &'a HashMap<String, KldAvgResult>,
+    category_data: &'a Vec<CategoryData>,
     summary: &'a Vec<String>,
 }
 
@@ -449,7 +679,7 @@ fn extract_mmlu_results(results: &serde_json::Value) -> HashMap<String, MmluProR
                                                     .and_then(|v| v.as_f64())
                                                     .unwrap_or(0.0)
                                             ),
-                                            corr: val_obj
+                                            correct: val_obj
                                                 .get("corr")
                                                 .and_then(|v| v.as_i64())
                                                 .unwrap_or(0),
@@ -524,7 +754,7 @@ fn extract_gpqa_results(results: &serde_json::Value) -> HashMap<String, GpqaResu
                                                     .and_then(|v| v.as_f64())
                                                     .unwrap_or(0.0)
                                             ),
-                                            corr: val_obj
+                                            correct: val_obj
                                                 .get("corr")
                                                 .and_then(|v| v.as_i64())
                                                 .unwrap_or(0),
@@ -638,7 +868,7 @@ fn extract_math500_results(results: &serde_json::Value) -> HashMap<String, Math5
                                                     .and_then(|v| v.as_f64())
                                                     .unwrap_or(0.0)
                                             ),
-                                            corr: val_obj
+                                            correct: val_obj
                                                 .get("corr")
                                                 .and_then(|v| v.as_i64())
                                                 .unwrap_or(0),
@@ -842,7 +1072,7 @@ fn extract_coding_eval_results(results: &serde_json::Value) -> HashMap<String, C
                                         .unwrap_or(false)
                                 })
                                 .filter_map(|task| {
-                                    Some(CodingEvalFailure {
+                                    Some(FailureResult {
                                         taskset: task.get("taskset")?.as_str()?.to_string(),
                                         task_id: task.get("task_id")?.as_str()?.to_string(),
                                         entry_point: task
@@ -1314,7 +1544,7 @@ fn generate_markdown_report(
                 model,
                 subject,
                 sdata.acc * 100.0,
-                sdata.corr,
+                sdata.correct,
                 sdata.wrong
             ));
         }
@@ -1342,7 +1572,7 @@ fn generate_markdown_report(
                     model,
                     category,
                     sdata.acc * 100.0,
-                    sdata.corr,
+                    sdata.correct,
                     sdata.wrong
                 ));
             }
@@ -1387,7 +1617,7 @@ fn generate_markdown_report(
                     model,
                     subject,
                     sdata.acc * 100.0,
-                    sdata.corr,
+                    sdata.correct,
                     sdata.wrong
                 ));
             }
