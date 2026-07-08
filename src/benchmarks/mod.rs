@@ -5,8 +5,11 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub mod aime;
+pub mod carwash;
 pub mod coding_eval;
 pub mod gpqa;
+pub mod harmbench;
+pub mod ifeval;
 pub mod kld;
 pub mod math500;
 pub mod minebench;
@@ -74,6 +77,18 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "minebench".to_string(),
             Box::new(minebench::MinebenchBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "carwash".to_string(),
+            Box::new(carwash::CarwashBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "ifeval".to_string(),
+            Box::new(ifeval::IFEvalBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "harmbench".to_string(),
+            Box::new(harmbench::HarmBenchBenchmark) as Box<dyn Benchmark>,
         );
         map.insert(
             "coding_eval".to_string(),

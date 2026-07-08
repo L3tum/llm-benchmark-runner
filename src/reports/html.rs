@@ -324,7 +324,10 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
                 model_count,
             }
         }
-        BenchmarkCategory::Reasoning | BenchmarkCategory::Research => CategoryData {
+        BenchmarkCategory::Reasoning
+        | BenchmarkCategory::Research
+        | BenchmarkCategory::InstructionFollowing
+        | BenchmarkCategory::Safety => CategoryData {
             name: cat.display().to_string(),
             name_slug: slugify_name(cat.display()),
             has_results: false,

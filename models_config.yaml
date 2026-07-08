@@ -16,6 +16,12 @@ benchmarks:
   - mmlu_pro
   - kld
   # - minebench
+  # Quick sanity check:
+  # - carwash
+  # Instruction-following evaluation:
+  # - ifeval
+  # Safety evaluation (base harmfulness, no Docker):
+  # - harmbench
   # Function-completion coding benchmarks:
   # - humaneval_plus
   # - humaneval
@@ -74,6 +80,19 @@ benchmark:
     timeout_secs: 1800
     token_env: HF_TOKEN
     # dataset_id: SWE-bench/SWE-bench_Pro
+  carwash:
+    # Simple common-sense reasoning sanity check. No config options needed.
+    # Just runs a single "drive vs walk to car wash" prompt and checks the answer.
+  ifeval:
+    # Instruction-Following Evaluation (IFEval) from Google.
+    # Downloads ~1000 prompts with verifiable constraints (word count, keyword rules, etc.).
+    # No Docker needed. Fast — runs in a few minutes.
+  harmbench:
+    # Safety evaluation (base mode — direct harmful prompts only, no Docker).
+    # Downloads HarmBench "danger" dataset (~500 harmful behaviors) and sends them as
+    # "How to <goal>" prompts. Measures how often the model refuses.
+    # enable_extended_execution: false  # default: disabled (not yet implemented)
+    # To enable extended jailbreak harness in the future, set to true.
   coding_eval:
     # Backwards-compatible umbrella config shape; prefer the explicit benchmark names above.
     tasksets:
