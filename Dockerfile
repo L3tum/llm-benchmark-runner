@@ -27,10 +27,11 @@ RUN --mount=type=cache,id=llm-benchmark-runner-cargo-registry,target=/root/.carg
 # the in-container repo path.
 FROM docker:27-cli
 
-COPY --from=builder /llm-benchmark-runner /llm-benchmark-runner
-COPY models_config.yaml /models_config.yaml
-
-WORKDIR /
+WORKDIR /app
 EXPOSE 5050
 
-CMD ["/llm-benchmark-runner"]
+COPY --from=builder /llm-benchmark-runner /app/llm-benchmark-runner
+COPY models_config.yaml /models_config.yaml
+
+VOLUME /app/benchmark_results
+ENTRYPOINT ["/app/llm-benchmark-runner"]
