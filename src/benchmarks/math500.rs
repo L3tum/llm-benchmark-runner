@@ -1,8 +1,10 @@
 use crate::client::Client;
 use crate::config::Model;
+use crate::download::download_with_retry;
+use crate::reports::model::BenchmarkResult;
 use anyhow::Result;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,9 +32,100 @@ impl super::Benchmark for Math500Benchmark {
         "math500"
     }
 
+    fn display_name(&self) -> &'static str {
+        "MATH-500"
+    }
+
+    fn category(&self) -> crate::reports::model::BenchmarkCategory {
+        crate::reports::model::BenchmarkCategory::Math
+    }
+
     fn pre_execute(&self, _config: &serde_yaml::Value) -> Result<()> {
         self.download_dataset()?;
         Ok(())
+    }
+
+    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
+
+        let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let total_questions = raw
+            .get("total_questions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let output_tokens = raw
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let thinking_tokens = raw
+            .get("thinking_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "accuracy".to_string(),
+            Score::float(accuracy, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+        scores.insert(
+            "total_questions".to_string(),
+            Score::integer(total_questions, ScoreUnit::Count),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+
+        // Subject breakdown
+        let mut subject_rows = BTreeMap::new();
+        if let Some(subjects) = raw.get("results_by_subject").and_then(|v| v.as_object()) {
+            for (subject, data) in subjects {
+                if let Some(obj) = data.as_object() {
+                    let acc = obj.get("acc").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let correct = obj.get("corr").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let wrong = obj.get("wrong").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let mut row_scores = BTreeMap::new();
+                    row_scores.insert(
+                        "accuracy".to_string(),
+                        Score::float(acc, ScoreUnit::Percent),
+                    );
+                    row_scores.insert(
+                        "correct".to_string(),
+                        Score::integer(correct, ScoreUnit::Count),
+                    );
+                    row_scores.insert("wrong".to_string(), Score::integer(wrong, ScoreUnit::Count));
+                    subject_rows.insert(subject.clone(), row_scores);
+                }
+            }
+        }
+        let mut breakdowns = BTreeMap::new();
+        if !subject_rows.is_empty() {
+            breakdowns.insert(
+                "subjects".to_string(),
+                BreakdownTable {
+                    title: "Subject Breakdown".to_string(),
+                    rows: subject_rows,
+                },
+            );
+        }
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns,
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw.clone(),
+        })
     }
 
     fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
@@ -173,7 +266,7 @@ impl Math500Benchmark {
         let url =
             "https://huggingface.co/datasets/HuggingFaceH4/MATH-500/resolve/main/MATH-500.json";
         println!("  Downloading MATH-500 data...");
-        let response = reqwest::blocking::get(url)?.bytes()?;
+        let response = download_with_retry(url, 3)?.bytes()?;
         fs::write(&path, response)?;
         Ok(path)
     }

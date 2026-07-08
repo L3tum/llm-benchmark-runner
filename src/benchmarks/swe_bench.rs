@@ -1,9 +1,11 @@
 use crate::client::Client;
 use crate::config::Model;
 use crate::docker_runner::{DockerBuildConfig, DockerMount, DockerRunConfig, DockerRunner};
+use crate::reports::model::BenchmarkResult;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -92,6 +94,72 @@ impl super::Benchmark for SweBenchBenchmark {
         "swebench"
     }
 
+    fn display_name(&self) -> &'static str {
+        "SWE-Bench"
+    }
+
+    fn category(&self) -> crate::reports::model::BenchmarkCategory {
+        crate::reports::model::BenchmarkCategory::LongContextCoding
+    }
+
+    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        use crate::reports::model::{Score, ScoreUnit};
+
+        let resolution_rate = raw
+            .get("resolution_rate")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let resolved = raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total_questions = raw
+            .get("total_questions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let output_tokens = raw
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let thinking_tokens = raw
+            .get("thinking_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "resolution_rate".to_string(),
+            Score::float(resolution_rate, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+        scores.insert(
+            "resolved".to_string(),
+            Score::integer(resolved, ScoreUnit::Count),
+        );
+        scores.insert(
+            "total_questions".to_string(),
+            Score::integer(total_questions, ScoreUnit::Count),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw.clone(),
+        })
+    }
+
     fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Basic, config)?;
         prepare_swebench(&cfg)?;
@@ -108,6 +176,72 @@ impl super::Benchmark for SweBenchVerifiedBenchmark {
         "swebench_verified"
     }
 
+    fn display_name(&self) -> &'static str {
+        "SWE-Bench Verified"
+    }
+
+    fn category(&self) -> crate::reports::model::BenchmarkCategory {
+        crate::reports::model::BenchmarkCategory::LongContextCoding
+    }
+
+    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        use crate::reports::model::{Score, ScoreUnit};
+
+        let resolution_rate = raw
+            .get("resolution_rate")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let resolved = raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total_questions = raw
+            .get("total_questions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let output_tokens = raw
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let thinking_tokens = raw
+            .get("thinking_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "resolution_rate".to_string(),
+            Score::float(resolution_rate, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+        scores.insert(
+            "resolved".to_string(),
+            Score::integer(resolved, ScoreUnit::Count),
+        );
+        scores.insert(
+            "total_questions".to_string(),
+            Score::integer(total_questions, ScoreUnit::Count),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw.clone(),
+        })
+    }
+
     fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Verified, config)?;
         prepare_swebench(&cfg)?;
@@ -122,6 +256,72 @@ impl super::Benchmark for SweBenchVerifiedBenchmark {
 impl super::Benchmark for SweBenchProBenchmark {
     fn name(&self) -> &str {
         "swebench_pro"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "SWE-Bench Pro"
+    }
+
+    fn category(&self) -> crate::reports::model::BenchmarkCategory {
+        crate::reports::model::BenchmarkCategory::LongContextCoding
+    }
+
+    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        use crate::reports::model::{BenchmarkResult, Score, ScoreUnit};
+
+        let resolution_rate = raw
+            .get("resolution_rate")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let resolved = raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total_questions = raw
+            .get("total_questions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let output_tokens = raw
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let thinking_tokens = raw
+            .get("thinking_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "resolution_rate".to_string(),
+            Score::float(resolution_rate, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+        scores.insert(
+            "resolved".to_string(),
+            Score::integer(resolved, ScoreUnit::Count),
+        );
+        scores.insert(
+            "total_questions".to_string(),
+            Score::integer(total_questions, ScoreUnit::Count),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw.clone(),
+        })
     }
 
     fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {

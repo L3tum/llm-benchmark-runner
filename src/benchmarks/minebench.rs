@@ -1,7 +1,8 @@
 use crate::client::Client;
 use crate::config::Model;
+use crate::reports::model::BenchmarkResult;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -245,6 +246,88 @@ Remember:
 impl super::Benchmark for MinebenchBenchmark {
     fn name(&self) -> &str {
         "minebench"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Minebench"
+    }
+
+    fn category(&self) -> crate::reports::model::BenchmarkCategory {
+        crate::reports::model::BenchmarkCategory::Creative
+    }
+
+    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        use crate::reports::model::{Artifact, Score, ScoreUnit};
+
+        let json_valid = raw
+            .get("json_valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let valid_buildings = raw
+            .get("valid_buildings")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let total_buildings = raw
+            .get("total_buildings")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        let output_file = raw
+            .get("output_file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let output_tokens = raw
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let thinking_tokens = raw
+            .get("thinking_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "valid_json".to_string(),
+            Score::bool(json_valid).primary(true).higher_is_better(true),
+        );
+        scores.insert(
+            "valid_buildings".to_string(),
+            Score::integer(valid_buildings, ScoreUnit::Count),
+        );
+        scores.insert(
+            "total_buildings".to_string(),
+            Score::integer(total_buildings, ScoreUnit::Count),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+
+        let artifacts = if !output_file.is_empty() {
+            vec![Artifact {
+                label: "Output".to_string(),
+                path: output_file,
+                kind: "file".to_string(),
+            }]
+        } else {
+            vec![]
+        };
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            artifacts,
+            diagnostics: vec![],
+            raw: raw.clone(),
+        })
     }
 
     fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {

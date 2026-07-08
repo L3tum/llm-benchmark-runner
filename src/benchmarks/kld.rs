@@ -1,8 +1,9 @@
 use crate::benchmarks::mmlu_pro::MmluProBenchmark;
 use crate::client::{Client, LogprobEntry};
 use crate::config::Model;
+use crate::reports::model::{BenchmarkResult, TestAggregate};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
 fn load_prompts_from_file(path: &str, num_prompts: usize) -> Result<Vec<String>> {
@@ -70,6 +71,104 @@ fn compute_kl_from_logprobs(logprobs_a: &[LogprobEntry], logprobs_b: &[LogprobEn
 impl super::Benchmark for KldBenchmark {
     fn name(&self) -> &str {
         "kld"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "KLD"
+    }
+
+    fn category(&self) -> crate::reports::model::BenchmarkCategory {
+        crate::reports::model::BenchmarkCategory::Similarity
+    }
+
+    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        use crate::reports::model::{Score, ScoreUnit};
+
+        // Per-model raw result structure (from execute):
+        // { model, num_prompts, kld: [...], output_tokens, thinking_tokens }
+        let num_prompts = raw.get("num_prompts").and_then(|v| v.as_i64()).unwrap_or(0);
+        let output_tokens = raw
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let thinking_tokens = raw
+            .get("thinking_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "num_prompts_evaluated".to_string(),
+            Score::integer(num_prompts, ScoreUnit::Count).primary(true),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+
+        // Add diagnostic noting that cross-model KLD is in the aggregate
+        use crate::reports::model::Diagnostic;
+        let diagnostics = vec![Diagnostic {
+            level: "info".to_string(),
+            message: "KLD score (similarity to other models) is shown in the aggregate/pairwise \
+                      table. This per-model result only shows execution statistics."
+                .to_string(),
+        }];
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics,
+            raw: raw.clone(),
+        })
+    }
+
+    fn to_report_aggregate(&self, raw: &serde_json::Value) -> Result<Option<TestAggregate>> {
+        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
+
+        // Extract pairwise KLD scores
+        if let Some(pairwise) = raw.get("pairwise").and_then(|v| v.as_object()) {
+            let mut rows = BTreeMap::new();
+            for (pair_key, pair_data) in pairwise {
+                if let Some(avg_kld) = pair_data.get("avg_kld").and_then(|v| v.as_f64()) {
+                    let num_prompts = pair_data
+                        .get("num_prompts_evaluated")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let mut row_scores = BTreeMap::new();
+                    row_scores.insert("avg_kld".to_string(), Score::float(avg_kld, ScoreUnit::Kld));
+                    row_scores.insert(
+                        "num_prompts_evaluated".to_string(),
+                        Score::integer(num_prompts, ScoreUnit::Count),
+                    );
+                    rows.insert(pair_key.clone(), row_scores);
+                }
+            }
+            if !rows.is_empty() {
+                return Ok(Some(TestAggregate {
+                    scores: BTreeMap::new(),
+                    breakdowns: BTreeMap::from([(
+                        "pairwise_kld".to_string(),
+                        BreakdownTable {
+                            title: "Pairwise KLD".to_string(),
+                            rows,
+                        },
+                    )]),
+                    raw: raw.clone(),
+                }));
+            }
+        }
+
+        Ok(None)
     }
 
     fn pre_execute(&self, _config: &serde_yaml::Value) -> Result<()> {
@@ -165,6 +264,8 @@ impl super::Benchmark for KldBenchmark {
         model_results: &HashMap<String, serde_json::Value>,
     ) -> Result<serde_json::Value> {
         let mut all_logits: HashMap<String, Vec<Vec<LogprobEntry>>> = HashMap::new();
+        let mut missing_models = Vec::new();
+
         for (name, data) in model_results {
             if let Some(kld_arr) = data.get("kld").and_then(|v| v.as_array()) {
                 let mut entries: Vec<Vec<LogprobEntry>> = Vec::new();
@@ -189,7 +290,18 @@ impl super::Benchmark for KldBenchmark {
                     }
                 }
                 all_logits.insert(name.clone(), entries);
+            } else {
+                // Model failed to produce KLD data
+                missing_models.push(name.clone());
             }
+        }
+
+        // If any model is missing KLD data, return a clear error instead of silently ignoring it.
+        if !missing_models.is_empty() {
+            return Err(anyhow::anyhow!(
+                "KLD post-execute: missing KLD data for models: {} (these models failed to produce KLD scores)",
+                missing_models.join(", ")
+            ));
         }
 
         let names: Vec<String> = all_logits.keys().cloned().collect();

@@ -1,8 +1,11 @@
+#![allow(dead_code)]
 mod benchmarks;
 mod client;
 mod config;
 mod docker_runner;
+mod download;
 mod report;
+mod reports;
 mod runner;
 mod utils;
 
@@ -11,6 +14,28 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+
+/// Signal handler for Ctrl-C (SIGINT): stops the current model process and exits.
+fn stop_model_and_exit() {
+    let mut pid_lock = runner::CURRENT_MODEL_PID.lock().unwrap();
+    if let Some(pid) = *pid_lock {
+        *pid_lock = None;
+        drop(pid_lock); // Release the lock before sending signals
+
+        // Send SIGTERM first, wait a second, then SIGKILL if still alive
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Force kill the process group (in case it spawned children)
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    // Exit the main process (guards will already be dropped if they're in scope,
+    // but we don't rely on that; the model is already stopped)
+    std::process::exit(1);
+}
 
 const DEFAULT_CONFIG: &str = "models_config.yaml";
 const RESULTS_FILE: &str = "benchmark_results/results.json";
@@ -55,6 +80,10 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Install the Ctrl-C handler to stop the model process gracefully.
+    ctrlc::set_handler(stop_model_and_exit).expect("Failed to set Ctrl-C handler");
+
     match cli.command {
         Commands::Run { config, no_resume } => run_benchmarks(&config, no_resume),
         Commands::TestModels { config } => test_models(&config),
@@ -475,10 +504,7 @@ fn generate_comparison_reports(
             format!("{}.html", slug)
         };
 
-        // Filter the results to only include models in this comparison
-        let filtered_results = report::filter_comparison_results(&results, comparison);
-
-        report::generate_comparison_report(&filtered_results, output_path, &filename)?;
+        report::generate_comparison_report(&results, output_path, &filename, comparison)?;
     }
 
     Ok(())

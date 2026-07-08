@@ -1,4 +1,5 @@
 use crate::config::Model;
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, TestAggregate, TestName};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -14,12 +15,30 @@ pub mod swe_bench;
 
 /// Trait for all benchmarks.
 pub trait Benchmark: Send + Sync {
-    #[expect(dead_code)]
     fn name(&self) -> &str;
+    /// Normalized test name for report data.
+    fn test_name(&self) -> TestName {
+        TestName::new(self.name().to_string())
+    }
+    /// Human-readable display name.
+    fn display_name(&self) -> &'static str;
+    /// Category for report grouping.
+    fn category(&self) -> BenchmarkCategory;
+
     fn pre_execute(&self, _config: &serde_yaml::Value) -> Result<()> {
         Ok(())
     }
     fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value>;
+    /// Convert the raw JSON result into a normalized `BenchmarkResult`.
+    /// Default implementation returns `Ok(BenchmarkResult::empty())` — benchmarks should override.
+    fn to_report_result(&self, _raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        Ok(BenchmarkResult::empty())
+    }
+    /// Convert the raw post-execute JSON into an optional aggregate.
+    /// Default returns `Ok(None)` — benchmarks like KLD should override.
+    fn to_report_aggregate(&self, _raw: &serde_json::Value) -> Result<Option<TestAggregate>> {
+        Ok(None)
+    }
     fn post_execute(
         &self,
         _model_results: &HashMap<String, serde_json::Value>,

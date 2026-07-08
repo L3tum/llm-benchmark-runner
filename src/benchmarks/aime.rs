@@ -1,8 +1,10 @@
 use crate::client::Client;
 use crate::config::Model;
+use crate::download::download_with_retry;
+use crate::reports::model::BenchmarkResult;
 use anyhow::Result;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -43,6 +45,14 @@ impl super::Benchmark for AimeBenchmark {
         "aime"
     }
 
+    fn display_name(&self) -> &'static str {
+        "AIME"
+    }
+
+    fn category(&self) -> crate::reports::model::BenchmarkCategory {
+        crate::reports::model::BenchmarkCategory::Math
+    }
+
     fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
         // Download the AIME 2025 test split
         let year = config
@@ -51,6 +61,61 @@ impl super::Benchmark for AimeBenchmark {
             .unwrap_or("2025");
         self.download_dataset(year)?;
         Ok(())
+    }
+
+    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+        use crate::reports::model::{Score, ScoreUnit};
+
+        let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let total_questions = raw
+            .get("total_questions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let correct = raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0);
+        let output_tokens = raw
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let thinking_tokens = raw
+            .get("thinking_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "accuracy".to_string(),
+            Score::float(accuracy, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+        scores.insert(
+            "correct".to_string(),
+            Score::integer(correct, ScoreUnit::Count),
+        );
+        scores.insert(
+            "total_questions".to_string(),
+            Score::integer(total_questions, ScoreUnit::Count),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw.clone(),
+        })
     }
 
     fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
@@ -151,7 +216,7 @@ impl AimeBenchmark {
             year
         );
 
-        let response = reqwest::blocking::get(url)?;
+        let response = download_with_retry(&url, 3)?;
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
                 "Failed to download AIME {} dataset (HTTP {}): {:?}",

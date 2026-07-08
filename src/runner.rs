@@ -3,11 +3,17 @@ use crate::client::Client;
 use crate::config::{self, DockerConfig, Model};
 use crate::utils::format_duration;
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Global tracker for the currently running model process PID.
+/// Used by the ctrl-c handler to stop the model gracefully.
+pub static CURRENT_MODEL_PID: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 
 /// Returns (model_results_json, successful_benchmarks, failed_benchmarks, per_bench_timings)
 /// per_bench_timings: HashMap<benchmark_name, Vec<Duration>> for this model's run
@@ -160,6 +166,8 @@ pub struct ModelProcessGuard {
 
 impl ModelProcessGuard {
     pub fn new(process: Child, cmd_stop: Option<String>) -> Self {
+        let pid = process.id() as u64;
+        *CURRENT_MODEL_PID.lock().unwrap() = Some(pid);
         Self {
             cmd_stop,
             process: Some(process),
@@ -167,6 +175,8 @@ impl ModelProcessGuard {
     }
 
     pub fn stop(&mut self) {
+        // Clear the global PID first to prevent double-kills from ctrl-c handler
+        *CURRENT_MODEL_PID.lock().unwrap() = None;
         if let Some(process) = self.process.take() {
             stop_model(&self.cmd_stop, process);
         }
