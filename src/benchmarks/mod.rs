@@ -28,10 +28,10 @@ pub trait Benchmark: Send + Sync {
     /// Category for report grouping.
     fn category(&self) -> BenchmarkCategory;
 
-    fn pre_execute(&self, _config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         Ok(())
     }
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value>;
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value>;
     /// Convert the raw JSON result into a normalized `BenchmarkResult`.
     /// Default implementation returns `Ok(BenchmarkResult::empty())` — benchmarks should override.
     fn to_report_result(&self, _raw: &serde_json::Value) -> Result<BenchmarkResult> {
@@ -126,7 +126,7 @@ pub fn get_benchmark_names() -> Vec<String> {
     registry().keys().cloned().collect()
 }
 
-pub fn pre_execute_benchmark(name: &str, config: &serde_yaml::Value) -> Result<()> {
+pub fn pre_execute_benchmark(name: &str, config: &yaml_serde::Value) -> Result<()> {
     registry()
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("Unknown benchmark: {name}"))?
@@ -136,7 +136,7 @@ pub fn pre_execute_benchmark(name: &str, config: &serde_yaml::Value) -> Result<(
 pub fn execute_benchmark(
     name: &str,
     model: &Model,
-    config: &serde_yaml::Value,
+    config: &yaml_serde::Value,
 ) -> Result<serde_json::Value> {
     registry()
         .get(name)

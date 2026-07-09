@@ -22,7 +22,7 @@ pub static CURRENT_MODEL_PID: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new
 pub fn run_model(
     model: &Model,
     benchmarks: &[String],
-    benchmark_config: &HashMap<String, serde_yaml::Value>,
+    benchmark_config: &HashMap<String, yaml_serde::Value>,
     docker_config: &DockerConfig,
     completed_benchmarks: &[String],
 ) -> Result<(
@@ -55,7 +55,7 @@ pub fn run_model(
             benchmark_config
                 .get(bench_name)
                 .cloned()
-                .unwrap_or(serde_yaml::Value::Null),
+                .unwrap_or(yaml_serde::Value::Null),
             docker_config,
         );
 

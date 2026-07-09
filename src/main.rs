@@ -157,7 +157,7 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
                 .benchmark
                 .get(bench_name)
                 .cloned()
-                .unwrap_or(serde_yaml::Value::Null),
+                .unwrap_or(yaml_serde::Value::Null),
             &config.docker,
         );
         if let Err(e) = benchmarks::pre_execute_benchmark(bench_name, &bench_cfg) {

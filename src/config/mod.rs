@@ -1,3 +1,5 @@
+pub mod macro_expansion;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -7,7 +9,7 @@ use std::fs;
 pub struct Config {
     pub models: Vec<Model>,
     pub benchmarks: Vec<String>,
-    pub benchmark: HashMap<String, serde_yaml::Value>,
+    pub benchmark: HashMap<String, yaml_serde::Value>,
     #[serde(default)]
     pub docker: DockerConfig,
     /// Optional list of model comparisons to generate filtered reports for.
@@ -97,29 +99,31 @@ pub struct Model {
 
 pub fn load_config(path: &str) -> Result<Config> {
     let content = fs::read_to_string(path).context("Failed to read config")?;
-    serde_yaml::from_str(&content).context("Failed to parse config")
+    let value = macro_expansion::expand_config(&content)
+        .context("Failed to expand config macros/variables")?;
+    yaml_serde::from_value(value).context("Failed to parse config")
 }
 
 pub fn attach_docker_config(
-    benchmark_config: serde_yaml::Value,
+    benchmark_config: yaml_serde::Value,
     docker: &DockerConfig,
-) -> serde_yaml::Value {
-    let docker_value = serde_yaml::to_value(docker).unwrap_or(serde_yaml::Value::Null);
+) -> yaml_serde::Value {
+    let docker_value = yaml_serde::to_value(docker).unwrap_or(yaml_serde::Value::Null);
     match benchmark_config {
-        serde_yaml::Value::Mapping(mut map) => {
+        yaml_serde::Value::Mapping(mut map) => {
             map.insert(
-                serde_yaml::Value::String("__docker".to_string()),
+                yaml_serde::Value::String("__docker".to_string()),
                 docker_value,
             );
-            serde_yaml::Value::Mapping(map)
+            yaml_serde::Value::Mapping(map)
         }
-        serde_yaml::Value::Null => {
-            let mut map = serde_yaml::Mapping::new();
+        yaml_serde::Value::Null => {
+            let mut map = yaml_serde::Mapping::new();
             map.insert(
-                serde_yaml::Value::String("__docker".to_string()),
+                yaml_serde::Value::String("__docker".to_string()),
                 docker_value,
             );
-            serde_yaml::Value::Mapping(map)
+            yaml_serde::Value::Mapping(map)
         }
         other => other,
     }

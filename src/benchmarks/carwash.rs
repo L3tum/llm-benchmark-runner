@@ -30,7 +30,7 @@ impl Benchmark for CarwashBenchmark {
         crate::reports::model::BenchmarkCategory::Reasoning
     }
 
-    fn execute(&self, model: &Model, _config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let client = Client::new(&model.proxy)?;
         let (response, output_tokens, thinking_tokens) =
             client.chat_completion(&model.model_name, "", CARWASH_PROMPT)?;

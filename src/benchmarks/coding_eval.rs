@@ -51,7 +51,7 @@ fn download_taskset(taskset: &TasksetConfig) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn parse_config(config: &serde_yaml::Value) -> Result<CodingEvalConfig> {
+fn parse_config(config: &yaml_serde::Value) -> Result<CodingEvalConfig> {
     let num_samples = config
         .get("num_samples")
         .and_then(|v| v.as_i64())
@@ -243,7 +243,7 @@ impl super::Benchmark for CodingEvalBenchmark {
         crate::reports::model::BenchmarkCategory::ShortContextCoding
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let parsed = parse_config(config)?;
         for taskset in &parsed.tasksets {
             if taskset.tasks_path.is_none() {
@@ -253,7 +253,7 @@ impl super::Benchmark for CodingEvalBenchmark {
         Ok(())
     }
 
-    fn execute(&self, _model: &Model, _config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, _model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
         // CodingEvalBenchmark is not meant to be run directly; use HumanEvalBenchmark etc.
         Err(anyhow::anyhow!("CodingEvalBenchmark execute: not directly runnable. Use HumanEval, HumanEval+, or MBPP+ instead."))
     }
@@ -373,24 +373,24 @@ impl super::Benchmark for CodingEvalBenchmark {
 /// Public helper to create the common benchmark result for pass@1 coding benchmarks.
 /// Used by HumanEval, HumanEval+, and MBPP+ to avoid code duplication.
 /// Create a config with a single preset taskset while preserving other config values.
-fn preset_config(config: &serde_yaml::Value, name: &str, task_type: TaskType) -> serde_yaml::Value {
+fn preset_config(config: &yaml_serde::Value, name: &str, task_type: TaskType) -> yaml_serde::Value {
     let mut map = if let Some(m) = config.as_mapping() {
         m.clone()
     } else {
-        serde_yaml::Mapping::new()
+        yaml_serde::Mapping::new()
     };
-    let mut taskset = serde_yaml::Mapping::new();
+    let mut taskset = yaml_serde::Mapping::new();
     taskset.insert(
-        serde_yaml::Value::String("name".into()),
-        serde_yaml::Value::String(name.into()),
+        yaml_serde::Value::String("name".into()),
+        yaml_serde::Value::String(name.into()),
     );
     taskset.insert(
-        serde_yaml::Value::String("task_type".into()),
-        serde_yaml::Value::String(task_type.as_str().into()),
+        yaml_serde::Value::String("task_type".into()),
+        yaml_serde::Value::String(task_type.as_str().into()),
     );
-    let tasksets = serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(taskset)]);
-    map.insert(serde_yaml::Value::String("tasksets".into()), tasksets);
-    serde_yaml::Value::Mapping(map)
+    let tasksets = yaml_serde::Value::Sequence(vec![yaml_serde::Value::Mapping(taskset)]);
+    map.insert(yaml_serde::Value::String("tasksets".into()), tasksets);
+    yaml_serde::Value::Mapping(map)
 }
 
 impl super::Benchmark for HumanEvalBenchmark {
@@ -411,12 +411,12 @@ impl super::Benchmark for HumanEvalBenchmark {
         common_coding_to_report_result(raw)
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let cfg = preset_config(config, "humaneval", TaskType::HumanEval);
         CodingEvalBenchmark.pre_execute(&cfg)
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let cfg = preset_config(config, "humaneval", TaskType::HumanEval);
         CodingEvalBenchmark.execute(model, &cfg)
     }
@@ -440,12 +440,12 @@ impl super::Benchmark for HumanEvalPlusBenchmark {
         common_coding_to_report_result(raw)
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let cfg = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
         CodingEvalBenchmark.pre_execute(&cfg)
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let cfg = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
         CodingEvalBenchmark.execute(model, &cfg)
     }
@@ -469,12 +469,12 @@ impl super::Benchmark for MbppPlusBenchmark {
         common_coding_to_report_result(raw)
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let cfg = preset_config(config, "mbpp_plus", TaskType::Mbpp);
         CodingEvalBenchmark.pre_execute(&cfg)
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let cfg = preset_config(config, "mbpp_plus", TaskType::Mbpp);
         CodingEvalBenchmark.execute(model, &cfg)
     }

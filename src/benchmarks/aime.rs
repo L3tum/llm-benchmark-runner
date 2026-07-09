@@ -53,7 +53,7 @@ impl super::Benchmark for AimeBenchmark {
         crate::reports::model::BenchmarkCategory::Math
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         // Download the AIME 2025 test split
         let year = config
             .get("year")
@@ -118,7 +118,7 @@ impl super::Benchmark for AimeBenchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let client = Client::new(&model.proxy)?;
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
 

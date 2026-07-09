@@ -74,7 +74,7 @@ impl super::Benchmark for MmluProBenchmark {
         crate::reports::model::BenchmarkCategory::Knowledge
     }
 
-    fn pre_execute(&self, _config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         // Download both test and validation datasets
         self.download_dataset("test")?;
         self.download_dataset("validation")?;
@@ -164,7 +164,7 @@ impl super::Benchmark for MmluProBenchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let client = Client::new(&model.proxy)?;
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
         let subjects_filter = config.get("subjects");

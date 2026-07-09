@@ -105,7 +105,7 @@ impl Benchmark for HarmBenchBenchmark {
         crate::reports::model::BenchmarkCategory::Safety
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let enable_extended = config
             .get("enable_extended_execution")
             .and_then(|v| v.as_bool())
@@ -119,7 +119,7 @@ impl Benchmark for HarmBenchBenchmark {
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let dataset = load_harmbench_dataset()?;
         let client = Client::new(&model.proxy)?;
 

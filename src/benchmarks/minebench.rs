@@ -330,7 +330,7 @@ impl super::Benchmark for MinebenchBenchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let client = Client::new(&model.proxy)?;
         let buildings = configured_buildings(config)?;
 
@@ -479,7 +479,7 @@ impl super::Benchmark for MinebenchBenchmark {
     }
 }
 
-fn configured_buildings(config: &serde_yaml::Value) -> Result<Vec<(String, String)>> {
+fn configured_buildings(config: &yaml_serde::Value) -> Result<Vec<(String, String)>> {
     if let Some(buildings) = config.get("buildings").and_then(|v| v.as_sequence()) {
         if buildings.is_empty() {
             return Err(anyhow::anyhow!("minebench.buildings cannot be empty"));

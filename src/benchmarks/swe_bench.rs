@@ -160,13 +160,13 @@ impl super::Benchmark for SweBenchBenchmark {
         })
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Basic, config)?;
         prepare_swebench(&cfg)?;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         execute_swebench(SweBenchDataset::Basic, model, config)
     }
 }
@@ -242,13 +242,13 @@ impl super::Benchmark for SweBenchVerifiedBenchmark {
         })
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Verified, config)?;
         prepare_swebench(&cfg)?;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         execute_swebench(SweBenchDataset::Verified, model, config)
     }
 }
@@ -324,13 +324,13 @@ impl super::Benchmark for SweBenchProBenchmark {
         })
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let cfg = parse_config(SweBenchDataset::Pro, config)?;
         prepare_swebench(&cfg)?;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         execute_swebench(SweBenchDataset::Pro, model, config)
     }
 }
@@ -338,7 +338,7 @@ impl super::Benchmark for SweBenchProBenchmark {
 fn execute_swebench(
     dataset: SweBenchDataset,
     model: &Model,
-    config: &serde_yaml::Value,
+    config: &yaml_serde::Value,
 ) -> Result<serde_json::Value> {
     let cfg = parse_config(dataset, config)?;
     prepare_swebench(&cfg)?;
@@ -548,7 +548,7 @@ fn run_swebench_harness(
     })
 }
 
-fn parse_config(dataset: SweBenchDataset, config: &serde_yaml::Value) -> Result<SweBenchConfig> {
+fn parse_config(dataset: SweBenchDataset, config: &yaml_serde::Value) -> Result<SweBenchConfig> {
     let docker_cfg = config.get("__docker");
     if docker_cfg
         .and_then(|docker| docker.get("enabled"))
@@ -866,13 +866,13 @@ mod tests {
 
     #[test]
     fn swebench_timeout_does_not_inherit_short_docker_default() {
-        let cfg: serde_yaml::Value = serde_yaml::from_str(
+        let cfg: yaml_serde::Value = yaml_serde::from_str(
             r#"
-__docker:
-  default_timeout_secs: 8
-  images:
-    swebench_harness: harness:latest
-"#,
+    __docker:
+      default_timeout_secs: 8
+      images:
+        swebench_harness: harness:latest
+    "#,
         )
         .unwrap();
         let parsed = parse_config(SweBenchDataset::Verified, &cfg).unwrap();
@@ -881,13 +881,13 @@ __docker:
 
     #[test]
     fn swebench_honors_shared_build_images_flag() {
-        let cfg: serde_yaml::Value = serde_yaml::from_str(
+        let cfg: yaml_serde::Value = yaml_serde::from_str(
             r#"
-__docker:
-  build_images: true
-  images:
-    swebench_harness: harness:latest
-"#,
+    __docker:
+      build_images: true
+      images:
+        swebench_harness: harness:latest
+    "#,
         )
         .unwrap();
         let parsed = parse_config(SweBenchDataset::Verified, &cfg).unwrap();

@@ -68,7 +68,7 @@ impl super::Benchmark for GpqaBenchmark {
         crate::reports::model::BenchmarkCategory::Knowledge
     }
 
-    fn pre_execute(&self, config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         // Download the diamond dataset
         let config_split = config
             .get("split")
@@ -161,7 +161,7 @@ impl super::Benchmark for GpqaBenchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let client = Client::new(&model.proxy)?;
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
         let subjects_filter = config.get("subjects");

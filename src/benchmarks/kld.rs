@@ -171,13 +171,13 @@ impl super::Benchmark for KldBenchmark {
         Ok(None)
     }
 
-    fn pre_execute(&self, _config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let mmlu = MmluProBenchmark;
-        mmlu.pre_execute(&serde_yaml::Value::Null)?;
+        mmlu.pre_execute(&yaml_serde::Value::Null)?;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let client = Client::new(&model.proxy)?;
         let num_prompts: usize = config
             .get("num_prompts")

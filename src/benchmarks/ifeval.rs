@@ -209,12 +209,12 @@ impl Benchmark for IFEvalBenchmark {
         crate::reports::model::BenchmarkCategory::InstructionFollowing
     }
 
-    fn pre_execute(&self, _config: &serde_yaml::Value) -> Result<()> {
+    fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let _ = load_ifeval_dataset()?;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &serde_yaml::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let dataset = load_ifeval_dataset()?;
         let client = Client::new(&model.proxy)?;
 

@@ -2,12 +2,12 @@
 
 A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it.
 
-Supports **MMLU-Pro**, **GPQA Diamond**, **AIME 2025/2026**, **MATH-500**, **Coding Eval** (HumanEval+, MBPP+), **SWE-Bench**, and **KLD divergence** between models.
+Supports **MMLU-Pro**, **GPQA Diamond**, **AIME 2025/2026**, **MATH-500**, **Coding Eval** (HumanEval+, MBPP+), **SWE-Bench**, **KLD divergence**, **Minebench**, **IFEval**, **HarmBench**, and more.
 
 ## Quick Start
 
 1. Configure your models in `models_config.yaml`
-2. Set `HF_TOKEN` if using GPQA Diamond (gated dataset):
+2. Set `HF_TOKEN` if using gated datasets (GPQA, SWE-bench-pro):
    ```bash
    export HF_TOKEN="hf_..."
    ```
@@ -39,18 +39,90 @@ Edit `models_config.yaml`. Each model is:
 
 The `benchmarks` list controls which benchmarks to run (default: all registered). The `benchmark` section holds per-benchmark configuration.
 
-```yaml
-models:
-  - display_name: "MyModel Q4"
-    model: "model"
-    cmd: "llama-server -m /path/to/model.Q4.gguf --port 28287"
-    proxy: "http://localhost:28287/v1"
-    cmd_stop: "pkill -9 llama-server"
+### Macros & Variables (Config Reuse)
 
-  - display_name: "MyModel Q5"
+Like llama-swap's macros, you can define **variables** and **block-level templates** (`!macro`) to avoid repetition across configs.
+
+**Variables** — define in `variables:` at the top, use `{{name}}` inline anywhere:
+
+```yaml
+variables:
+  llama-server: "llama-server"
+  model-dir: "/models"
+  common-flags: "--threads 8"
+  base-port: 28287
+
+models:
+  - display_name: "Q4 Model"
     model: "model"
-    cmd: "llama-server -m /path/to/model.Q5.gguf --port 28288"
-    proxy: "http://localhost:28288/v1"
+    cmd: "{{llama-server}} -m {{model-dir}}/model.Q4.gguf {{common-flags}} --port {{base-port}}"
+    proxy: "http://localhost:{{base-port}}/v1"
+```
+
+**Macros** — define block templates in `macros:` and instantiate with `!macro [name, {args}]`:
+
+```yaml
+macros:
+  server_model:
+    model_name: "model"
+    cmd: "{{llama-server}} -m {{model-dir}}/model.{{variant}}.gguf {{common-flags}} --port {{port}}"
+    proxy: "http://localhost:{{port}}/v1"
+
+models:
+  - !macro [server_model, {variant: Q4, port: 28287}]
+    display_name: "Q4 Model"
+  - !macro [server_model, {variant: Q5, port: 28288}]
+    display_name: "Q5 Model"
+```
+
+**How it works:**
+- Macro arguments act as local variables that override global variables for that block
+- Macros can nest — a macro can call another macro (with cycle detection)
+- Standard YAML anchors (`&`/`*`) still work alongside macros
+
+A full example config is in `test_macro_config.yaml`.
+
+**Nested Macros** — a macro template can invoke another macro as a field value:
+
+```yaml
+macros:
+  outer:
+    msg: !macro [inner, {name: World}]
+    extra: "field"
+  inner:
+    msg: "Hello {{name}}!"
+
+result:
+  !macro [outer, {}]
+```
+
+The `!macro` call must be the value of a key (not a bare block scalar), so YAML remains valid. The expanded `result` becomes:
+
+```yaml
+result:
+  msg: "Hello World!"
+  extra: "field"
+```
+
+### Full Configuration Example
+
+```yaml
+variables:
+  llama-server: "llama-server"
+  model-dir: "/models"
+  common-flags: "--threads 8"
+
+macros:
+  server_model:
+    model_name: "model"
+    cmd: "{{llama-server}} -m {{model-dir}}/model.{{variant}}.gguf {{common-flags}} --port {{port}}"
+    proxy: "http://localhost:{{port}}/v1"
+
+models:
+  - !macro [server_model, {variant: Q4, port: 28287}]
+    display_name: "Q4 Model"
+  - !macro [server_model, {variant: Q5, port: 28288}]
+    display_name: "Q5 Model"
 
 benchmarks:
   - mmlu_pro
@@ -58,7 +130,11 @@ benchmarks:
   - gpqa
   - aime
   - math500
-  # - humaneval_plus
+  - minebench
+  - carwash
+  - ifeval
+  - harmbench
+  - humaneval_plus
   # - mbpp_plus
   # - swebench_verified
 
@@ -89,6 +165,9 @@ benchmark:
   math500:
     # num_samples: 50   # all 500 problems
     # subjects: "algebra"
+  minebench:
+    # buildings: [castle, dragon]
+    # build: "A compact test castle"
   humaneval_plus:
     num_samples: 10
     timeout_secs: 8
@@ -105,6 +184,13 @@ benchmark:
     split: test
     timeout_secs: 1800
     token_env: HF_TOKEN
+
+# Comparison groups for generating filtered reports
+comparisons:
+  - title: "Q4 vs Q5"
+    models:
+      - "Q4 Model"
+      - "Q5 Model"
 ```
 
 ### Docker for Code Benchmarks
@@ -166,53 +252,85 @@ cargo run -- compare --config models_config.yaml
 
 Options: `--results` (results JSON path), `--output` (output directory), `--config` (comparison definitions).
 
-## Benchmarks
+## Available Benchmarks
 
-### MMLU-Pro
+All benchmarks are registered by name and can be listed with the `benchmarks` key in your config.
 
-Auto-downloaded from HuggingFace (`TIGER-Lab/MMLU-Pro`). Supports up to 10 options (A–J), few-shot CoT prompting, and per-subject accuracy reporting.
+### MMLU-Pro (`mmlu_pro`)
 
-### KLD Divergence
+Auto-downloaded from HuggingFace (`TIGER-Lab/MMLU-Pro`). Supports up to 10 options (A–J), few-shot chain-of-thought prompting, and per-subject accuracy reporting.
 
-Collects logprobs from all models on shared prompts (defaults to MMLU-Pro). Computes pairwise KL divergence at the end — lower values mean more similar output distributions.
+**Config options:** `num_samples`, `subjects` (comma-separated subjects, `null` = all).
 
-### GPQA Diamond
+### KLD Divergence (`kld`)
+
+Collects logprobs from all models on shared prompts. Computes pairwise KL divergence at the end — lower values mean more similar output distributions.
+
+**Config options:** `num_prompts`, `prompt_source` (e.g., `mmlu` to use MMLU-Pro prompts), `custom_prompts_path` (path to a prompts file).
+
+### GPQA Diamond (`gpqa`)
 
 198 graduate-level science multiple-choice questions (biology, chemistry, physics). Zero-shot chain-of-thought with A–D answer extraction. **Requires `HF_TOKEN`**.
 
-Config options: `num_samples`, `subjects` (comma-separated categories).
+**Config options:** `num_samples`, `subjects` (comma-separated: biology, chemistry, physics).
 
-### AIME
+### AIME (`aime`)
 
 American Invitational Mathematics Examination. Competition-level math problems with integer answer extraction from `\boxed{}` notation. Supports **AIME 2025** and **AIME 2026** datasets from MathArena on HuggingFace.
 
-Config options: `num_samples` (30 total), `year` ("2025" or "2026").
+**Config options:** `num_samples` (30 total), `year` ("2025" or "2026").
 
-### MATH-500
+### MATH-500 (`math500`)
 
-500 competition-level math problems across 7 subjects. Zero-shot chain-of-thought with integer answer extraction.
+500 competition-level math problems across 7 subjects (algebra, geometry, number theory, precalculus, probability, counting & combinatorics, intermediate algebra). Zero-shot chain-of-thought with integer answer extraction.
 
-Config options: `num_samples` (500 total), `subjects` (algebra, geometry, number theory, precalculus, etc.).
+**Config options:** `num_samples` (500 total), `subjects` (comma-separated subject names).
 
-### Coding Eval
+### Minebench (`minebench`)
 
-Docker-backed function-completion evaluation using **EvalPlus-style** oracle-separated testing:
+3D voxel building task from the Minebench benchmark. Models are prompted to generate Minecraft-style voxel architectures. Builds are parsed from JSON output (boxes, lines, blocks) and evaluated for validity and completeness.
 
-- `humaneval_plus` — HumanEval+ (EvalPlus)
-- `mbpp_plus` — MBPP+ (EvalPlus)
-- `humaneval` — original HumanEval (public tests)
+**Config options:** `buildings` (list of predefined building prompts like `castle`, `dragon`, `train`), `build` (single custom build description).
+
+### Carwash (`carwash`)
+
+A simple common-sense reasoning sanity check. Sends a single "drive vs walk to car wash" prompt and checks that the model's answer is logically correct.
+
+No config options — runs with defaults.
+
+### IFEval (`ifeval`)
+
+**Instruction-Following Evaluation** from Google. ~1,000 prompts with verifiable constraints (word count, keyword rules, formatting requirements, etc.). Downloads from HuggingFace, runs fast, no Docker required. Measures how often the model correctly follows all instructions.
+
+No config options.
+
+### HarmBench (`harmbench`)
+
+Safety evaluation (base mode). Downloads the HarmBench "danger" dataset (~500 harmful behaviors) and sends them as "How to \<goal\>" prompts. Measures how often the model refuses. Does not require Docker.
+
+**Config options:** `enable_extended_execution` (future: extended jailbreak harness, currently disabled).
+
+### Coding Eval (HumanEval+, MBPP+, HumanEval)
+
+Docker-backed function-completion evaluation using **EvalPlus-style** oracle-separated testing. Code is sent to the model, generated solutions are tested in isolated Docker containers.
+
+- **`humaneval_plus`** — HumanEval+ (EvalPlus, includes adversarial tests)
+- **`mbpp_plus`** — MBPP+ (EvalPlus, includes adversarial tests)
+- **`humaneval`** — original HumanEval (public tests only)
 
 `enable_pass2`/`enable_pass3` enable iterative repair: the failed solution and error summary are fed back to the model. If an earlier attempt passes, later attempts are skipped.
+
+**Config options:** `num_samples`, `timeout_secs`, `enable_pass2`, `enable_pass3`, `language_images` (custom Docker image per language).
 
 Generated code is saved under `benchmark_results/coding_eval_runs/...`.
 
 ### SWE-Bench
 
-Docker-backed repository patch benchmarks:
+Docker-backed repository patch benchmarks. Models are given a bug report and a repository state, and must generate a patch that fixes the issue. The harness validates patches by applying them and running the repository's test suite.
 
-- `swebench` — Basic/full dataset
-- `swebench_verified` — Verified
-- `swebench_pro` — Pro-style gated dataset (requires `HF_TOKEN` and/or `dataset_id`)
+- **`swebench`** — Full dataset (may be slow)
+- **`swebench_verified`** — Verified subset (recommended)
+- **`swebench_pro`** — Pro-style gated dataset (requires `HF_TOKEN` and/or `dataset_id`)
 
 Harness images auto-build from `docker/swebench-harness/Dockerfile` when `docker.build_images: true`. To build manually:
 
@@ -221,6 +339,12 @@ make swebench-harness-image
 ```
 
 Predictions are saved under `benchmark_results/swe_bench_runs/...`. Runs can be slow due to repository-specific environment builds.
+
+**Config options:** `num_samples`, `split` (e.g., `test`), `timeout_secs` (per-task timeout), `token_env` (env var for API key), `dataset_id` (HuggingFace dataset for pro version).
+
+### Legacy: `coding_eval` (umbrella)
+
+Backwards-compatible config shape. If you list `coding_eval` in your `benchmarks` and configure a `tasksets` under `benchmark.coding_eval`, it will run the specified coding benchmarks. Prefer using the explicit benchmark names above.
 
 ## Adding New Benchmarks
 
@@ -232,7 +356,7 @@ Predictions are saved under `benchmark_results/swe_bench_runs/...`. Runs can be 
    impl Benchmark for MyBenchmark {
        fn name(&self) -> &str { "my_bench" }
 
-       fn execute(&self, model: &Model, config: &serde_yaml::Value)
+       fn execute(&self, model: &Model, config: &yaml_serde::Value)
            -> Result<serde_json::Value>
        {
            // Your benchmark logic

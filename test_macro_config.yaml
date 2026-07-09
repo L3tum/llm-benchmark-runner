@@ -1,0 +1,27 @@
+variables:
+  llama-server: "llama-server"
+  model-dir: "/models"
+  common-flags: "--threads 8"
+
+macros:
+  server_model:
+    model_name: "model"
+    cmd: "{{llama-server}} -m {{model-dir}}/model.{{variant}}.gguf {{common-flags}} --port {{port}}"
+    proxy: "http://localhost:{{port}}/v1"
+
+models:
+  - !macro [server_model, {variant: Q4, port: 28287}]
+    display_name: "Q4 Model"
+  - !macro [server_model, {variant: Q5, port: 28288}]
+    display_name: "Q5 Model"
+
+benchmarks:
+  - mmlu_pro
+
+benchmark:
+  mmlu_pro:
+    num_samples: 1
+    subjects: "astronomy"
+
+docker:
+  enabled: false
