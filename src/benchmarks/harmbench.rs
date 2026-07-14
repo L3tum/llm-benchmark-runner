@@ -121,7 +121,7 @@ impl Benchmark for HarmBenchBenchmark {
 
     fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
         let dataset = load_harmbench_dataset()?;
-        let client = Client::new(&model.proxy)?;
+        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
 
         let mut total_instances = 0;
         let mut refused_count = 0;

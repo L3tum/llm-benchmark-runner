@@ -2,6 +2,7 @@ pub mod macro_expansion;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
 use std::fs;
 
@@ -95,6 +96,10 @@ pub struct Model {
     pub proxy: String,
     #[serde(default)]
     pub cmd_stop: Option<String>,
+    /// Optional model-level parameters to merge into every request.
+    /// These override any benchmark-level parameters.
+    #[serde(default)]
+    pub set_params: Option<HashMap<String, serde_json::Value>>,
 }
 
 pub fn load_config(path: &str) -> Result<Config> {

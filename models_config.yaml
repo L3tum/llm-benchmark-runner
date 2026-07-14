@@ -6,6 +6,12 @@ models:
     model: "model"  # model name to send to the proxy API (llama-server uses "model")
     cmd: "llama-server -m /path/to/model.Q4.gguf --port 28287"
     proxy: "http://localhost:28287/v1"
+    # set_params merges these into every request, overriding benchmark-level params.
+    # Useful for temperature, seed, top_p, logprobs, etc.
+    set_params:
+      temperature: 0.1
+      seed: 42
+      # logprobs: false  # can override logprobs method's defaults
 
   - display_name: "MyModel Q5"
     model: "model"

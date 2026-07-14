@@ -31,7 +31,7 @@ impl Benchmark for CarwashBenchmark {
     }
 
     fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
-        let client = Client::new(&model.proxy)?;
+        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let (response, output_tokens, thinking_tokens) =
             client.chat_completion(&model.model_name, "", CARWASH_PROMPT)?;
 

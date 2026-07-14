@@ -165,7 +165,7 @@ impl super::Benchmark for MmluProBenchmark {
     }
 
     fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
-        let client = Client::new(&model.proxy)?;
+        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
         let subjects_filter = config.get("subjects");
         let subjects: Option<Vec<String>> = match subjects_filter {

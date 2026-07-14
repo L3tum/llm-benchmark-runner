@@ -342,7 +342,7 @@ fn execute_swebench(
 ) -> Result<serde_json::Value> {
     let cfg = parse_config(dataset, config)?;
     prepare_swebench(&cfg)?;
-    let client = Client::new(&model.proxy)?;
+    let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
     let mut instances = load_or_download_dataset(&cfg)?;
     if let Some(limit) = cfg.num_samples {
         instances.truncate(limit);

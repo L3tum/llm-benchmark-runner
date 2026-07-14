@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogprobEntry {
     pub token: String,
@@ -52,6 +53,7 @@ struct ModelsResponse {
 pub struct Client {
     base_url: reqwest::Url,
     http: reqwest::blocking::Client,
+    model_params: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn rough_token_count(text: &str) -> u64 {
@@ -97,12 +99,26 @@ fn token_usage_from_response(
     (output_tokens, thinking_tokens)
 }
 impl Client {
-    pub fn new(base_url: &str) -> Result<Self> {
+    /// Create a client with optional model-level parameters.
+    pub fn new_with_model_params(
+        base_url: &str,
+        model_params: Option<&HashMap<String, serde_json::Value>>,
+    ) -> Result<Self> {
         let base_url = reqwest::Url::parse(base_url)?;
         let http = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
-        Ok(Self { base_url, http })
+        let model_params = model_params.map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+        });
+        Ok(Self { base_url, http, model_params })
+    }
+
+    /// Create a client without model-level parameters (thin wrapper).
+    pub fn new(base_url: &str) -> Result<Self> {
+        Self::new_with_model_params(base_url, None)
     }
     pub fn check_health(&self) -> Result<()> {
         let url = self.base_url.join("models")?;
@@ -120,13 +136,21 @@ impl Client {
         user: &str,
     ) -> Result<(String, Option<u64>, Option<u64>)> {
         let url = self.base_url.join("chat/completions")?;
-        let req = serde_json::json!({
+        let mut req = serde_json::json!({
             "model": model_name,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         });
+        // Merge model params last so they take final precedence over everything else
+        if let Some(params) = &self.model_params {
+            if let Some(req_obj) = req.as_object_mut() {
+                for (k, v) in params {
+                    req_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
         let resp = self.http.post(url).json(&req).send()?;
         if !resp.status().is_success() {
             return Err(anyhow::anyhow!("API error: {}", resp.status()));
@@ -160,7 +184,7 @@ impl Client {
         user: &str,
     ) -> Result<(Vec<LogprobEntry>, Option<u64>, Option<u64>)> {
         let url = self.base_url.join("chat/completions")?;
-        let req = serde_json::json!({
+        let mut req = serde_json::json!({
             "model": model_name,
             "messages": [
                 {"role": "system", "content": system},
@@ -169,6 +193,14 @@ impl Client {
             "logprobs": true,
             "top_logprobs": 10,
         });
+        // Merge model params last so they take final precedence (overrides logprobs, top_logprobs, etc.)
+        if let Some(params) = &self.model_params {
+            if let Some(req_obj) = req.as_object_mut() {
+                for (k, v) in params {
+                    req_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
         let resp = self.http.post(url).json(&req).send()?;
         if !resp.status().is_success() {
             return Err(anyhow::anyhow!("API error: {}", resp.status()));

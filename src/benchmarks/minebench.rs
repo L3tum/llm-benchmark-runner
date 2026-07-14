@@ -331,7 +331,7 @@ impl super::Benchmark for MinebenchBenchmark {
     }
 
     fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
-        let client = Client::new(&model.proxy)?;
+        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let buildings = configured_buildings(config)?;
 
         println!(
