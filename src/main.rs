@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod docker_runner;
 mod download;
+mod error_classes;
 mod report;
 mod reports;
 mod runner;

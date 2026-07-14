@@ -365,6 +365,7 @@ impl super::Benchmark for CodingEvalBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns,
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),

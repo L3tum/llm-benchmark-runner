@@ -1,3 +1,4 @@
+use crate::benchmarks::answer_classifier::{classify_wrong_answer, WrongAnswerClass};
 use crate::client::Client;
 use crate::config::Model;
 use crate::reports::model::BenchmarkResult;
@@ -152,9 +153,34 @@ impl super::Benchmark for GpqaBenchmark {
             );
         }
 
+        // Parse error classification from raw JSON (display names → typed enum)
+        let error_classification: BTreeMap<WrongAnswerClass, i64> = raw
+            .get("error_classification")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(key, val)| {
+                        let class = match key.as_str() {
+                            "Wrong Answer Key" => Some(WrongAnswerClass::WrongAnswerKey),
+                            "Invalid Answer Key" => Some(WrongAnswerClass::InvalidAnswerKey),
+                            "No Answer" => Some(WrongAnswerClass::NoAnswer),
+                            "Uncertainty" => Some(WrongAnswerClass::Uncertainty),
+                            "Refused" => Some(WrongAnswerClass::Refused),
+                            "Looping" => Some(WrongAnswerClass::Looping),
+                            "Truncated" => Some(WrongAnswerClass::Truncated),
+                            "Off-Topic / Hallucination" => Some(WrongAnswerClass::OffTopic),
+                            _ => None,
+                        };
+                        class.zip(val.as_i64())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(BenchmarkResult {
             scores,
             breakdowns,
+            error_classification,
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),
@@ -208,6 +234,7 @@ impl super::Benchmark for GpqaBenchmark {
         let mut total_questions = 0usize;
         let mut total_output_tokens: u64 = 0;
         let mut total_thinking_tokens: u64 = 0;
+        let mut overall_wrong_classes: BTreeMap<WrongAnswerClass, i64> = BTreeMap::new();
 
         let choice_map = "ABCD";
 
@@ -247,11 +274,18 @@ impl super::Benchmark for GpqaBenchmark {
                     client.chat_completion(&model.model_name, "", &prompt)?;
                 total_output_tokens += output_tokens.unwrap_or(0);
                 total_thinking_tokens += thinking_tokens.unwrap_or(0);
-                let pred = extract_answer(&response).ok_or_else(|| {
-                    eprintln!("  Error extracting answer from: {}", response);
-                    anyhow::anyhow!("Cannot extract answer")
-                })?;
-                let is_correct = pred == q.answer.chars().next().unwrap_or(pred);
+                let pred = extract_answer(&response);
+                let is_correct = pred == q.answer.chars().next();
+                if !is_correct {
+                    let wrong_class = classify_wrong_answer(
+                        &response,
+                        &question_text,
+                        q.answer.chars().next().unwrap_or('?'),
+                        pred,
+                    );
+                    let counter = overall_wrong_classes.entry(wrong_class).or_insert(0);
+                    *counter += 1;
+                }
                 if is_correct {
                     category_correct += 1;
                 }
@@ -288,12 +322,19 @@ impl super::Benchmark for GpqaBenchmark {
             0.0
         };
 
+        // Error classification map: convert typed map to display names for raw JSON
+        let error_classification_display: BTreeMap<String, i64> = overall_wrong_classes
+            .iter()
+            .map(|(k, v)| (k.display().to_string(), *v))
+            .collect();
+
         Ok(serde_json::json!({
             "accuracy": overall_accuracy,
             "results_by_subject": category_record,
             "total_questions": total_questions,
             "output_tokens": total_output_tokens,
             "thinking_tokens": total_thinking_tokens,
+            "error_classification": error_classification_display,
         }))
     }
 }

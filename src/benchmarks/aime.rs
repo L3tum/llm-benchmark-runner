@@ -112,6 +112,7 @@ impl super::Benchmark for AimeBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),

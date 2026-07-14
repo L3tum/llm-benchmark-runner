@@ -1,3 +1,4 @@
+use crate::error_classes::WrongAnswerClass;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -274,6 +275,8 @@ pub struct BenchmarkResult {
     pub scores: BTreeMap<String, Score>,
     /// Optional structured benchmark-specific tables.
     pub breakdowns: BTreeMap<String, BreakdownTable>,
+    /// Per-error-class breakdown keyed by the enum (used by all benchmarks for error classification).
+    pub error_classification: BTreeMap<WrongAnswerClass, i64>,
     pub artifacts: Vec<Artifact>,
     pub diagnostics: Vec<Diagnostic>,
     /// Raw benchmark payload for backwards compatibility and custom renderers.
@@ -285,6 +288,7 @@ impl BenchmarkResult {
         Self {
             scores: BTreeMap::new(),
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: Value::Null,

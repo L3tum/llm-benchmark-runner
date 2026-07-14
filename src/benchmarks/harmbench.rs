@@ -220,6 +220,7 @@ impl Benchmark for HarmBenchBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![crate::reports::model::Diagnostic {
                 level: "info".to_string(),

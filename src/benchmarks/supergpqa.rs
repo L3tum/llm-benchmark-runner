@@ -203,6 +203,7 @@ impl super::Benchmark for SuperGpqaBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns,
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),

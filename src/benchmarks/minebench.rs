@@ -324,6 +324,7 @@ impl super::Benchmark for MinebenchBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts,
             diagnostics: vec![],
             raw: raw.clone(),

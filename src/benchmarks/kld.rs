@@ -126,6 +126,7 @@ impl super::Benchmark for KldBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics,
             raw: raw.clone(),

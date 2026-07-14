@@ -122,6 +122,7 @@ impl super::Benchmark for Math500Benchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns,
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),

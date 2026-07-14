@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub mod aime;
+pub mod answer_classifier;
 pub mod carwash;
 pub mod coding_eval;
 pub mod gpqa;

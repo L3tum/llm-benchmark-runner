@@ -154,6 +154,7 @@ impl super::Benchmark for SweBenchBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),
@@ -236,6 +237,7 @@ impl super::Benchmark for SweBenchVerifiedBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),
@@ -318,6 +320,7 @@ impl super::Benchmark for SweBenchProBenchmark {
         Ok(BenchmarkResult {
             scores,
             breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),
