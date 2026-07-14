@@ -1,6 +1,6 @@
 use crate::client::Client;
 use crate::config::Model;
-use crate::download::download_with_retry;
+use crate::download::download_with_retry_bytes;
 use crate::reports::model::BenchmarkResult;
 use anyhow::Result;
 use regex::Regex;
@@ -266,8 +266,8 @@ impl Math500Benchmark {
         let url =
             "https://huggingface.co/datasets/HuggingFaceH4/MATH-500/resolve/main/MATH-500.json";
         println!("  Downloading MATH-500 data...");
-        let response = download_with_retry(url, 3)?.bytes()?;
-        fs::write(&path, response)?;
+        let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")?;
+        fs::write(&path, bytes)?;
         Ok(path)
     }
 }

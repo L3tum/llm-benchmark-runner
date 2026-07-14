@@ -36,7 +36,9 @@ fn download_taskset(taskset: &TasksetConfig) -> Result<PathBuf> {
         return Ok(path);
     }
     println!("  Downloading coding_eval taskset {}...", taskset.name);
-    let bytes = download_with_retry(url, 3)?.error_for_status()?.bytes()?;
+    let bytes = download_with_retry(url, 3, 60, "llm-benchmark-runner")?
+        .error_for_status()?
+        .bytes()?;
     let tmp_path = path.with_extension(format!(
         "{}.tmp.{}",
         path.extension()

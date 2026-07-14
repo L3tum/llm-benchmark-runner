@@ -113,7 +113,11 @@ impl Client {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<serde_json::Map<String, serde_json::Value>>()
         });
-        Ok(Self { base_url, http, model_params })
+        Ok(Self {
+            base_url,
+            http,
+            model_params,
+        })
     }
 
     /// Create a client without model-level parameters (thin wrapper).

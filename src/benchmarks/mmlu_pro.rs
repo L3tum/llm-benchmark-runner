@@ -1,6 +1,6 @@
 use crate::client::Client;
 use crate::config::Model;
-use crate::download::download_with_retry;
+use crate::download::download_with_retry_bytes;
 use crate::reports::model::BenchmarkResult;
 use anyhow::Result;
 use regex::Regex;
@@ -36,8 +36,8 @@ impl MmluProBenchmark {
             split, split
         );
         println!("  Downloading MMLU-Pro {} data...", split);
-        let response = download_with_retry(&url, 3)?.bytes()?;
-        fs::write(&path, response)?;
+        let bytes = download_with_retry_bytes(&url, 3, 120, "llm-benchmark-runner")?;
+        fs::write(&path, bytes)?;
         Ok(path)
     }
 

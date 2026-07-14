@@ -14,6 +14,7 @@ pub mod kld;
 pub mod math500;
 pub mod minebench;
 pub mod mmlu_pro;
+pub mod supergpqa;
 pub mod swe_bench;
 
 /// Trait for all benchmarks.
@@ -57,6 +58,10 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "mmlu_pro".to_string(),
             Box::new(mmlu_pro::MmluProBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "supergpqa".to_string(),
+            Box::new(supergpqa::SuperGpqaBenchmark) as Box<dyn Benchmark>,
         );
         map.insert(
             "kld".to_string(),

@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::client::Client;
 use crate::config::Model;
-use crate::download::download_with_retry;
+use crate::download::download_with_retry_bytes;
 use crate::reports::model::{BenchmarkResult, Score, ScoreUnit};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -66,9 +66,7 @@ fn load_harmbench_dataset() -> Result<Vec<HarmBenchInstance>> {
 
     fs::create_dir_all(&cache_dir)?;
     println!("  Downloading HarmBench danger dataset...");
-    let bytes = download_with_retry(HARMBENCH_DANGER_HF_URL, 3)?
-        .error_for_status()?
-        .bytes()?;
+    let bytes = download_with_retry_bytes(HARMBENCH_DANGER_HF_URL, 3, 180, "llm-benchmark-runner")?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
     fs::write(&tmp_path, bytes)?;
     fs::rename(&tmp_path, &path).context("failed to rename HarmBench download")?;

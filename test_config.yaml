@@ -47,6 +47,9 @@ benchmark:
     buildings: [castle, dragon, train]
     # Optional legacy/custom single prompt:
     # build: "A compact test castle"
+  supergpqa:
+    num_samples: 1
+    subjects: "Mathematics"  # Test a single discipline (Mathematics has many questions)
   humaneval_plus:
     num_samples: 1
     timeout_secs: 8

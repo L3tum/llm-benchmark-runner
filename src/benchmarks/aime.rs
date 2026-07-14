@@ -1,8 +1,8 @@
 use crate::client::Client;
 use crate::config::Model;
-use crate::download::download_with_retry;
+use crate::download::download_with_retry_bytes;
 use crate::reports::model::BenchmarkResult;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -216,16 +216,9 @@ impl AimeBenchmark {
             year
         );
 
-        let response = download_with_retry(&url, 3)?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to download AIME {} dataset (HTTP {}): {:?}",
-                year,
-                response.status(),
-                response.text()
-            ));
-        }
-        let api_result: serde_json::Value = response.json()?;
+        let bytes = download_with_retry_bytes(&url, 3, 120, "llm-benchmark-runner")?;
+        let api_result: serde_json::Value =
+            serde_json::from_slice(&bytes).context("Failed to parse AIME API response")?;
         // Extract rows from the API response and save as a JSON array
         let rows: Vec<serde_json::Value> = api_result["rows"]
             .as_array()
