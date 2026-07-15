@@ -132,10 +132,10 @@ fn parse_config(config: &yaml_serde::Value) -> Result<CodingEvalConfig> {
 
 /// Public helper to create the common benchmark result for pass@1 coding benchmarks.
 /// Used by HumanEval, HumanEval+, and MBPP+ to avoid code duplication.
-pub fn common_coding_to_report_result(raw: &serde_json::Value) -> Result<BenchmarkResult> {
-    // Need the trait in scope to call to_report_result
+pub fn common_coding_to_report_result(b: &BenchmarkResult) -> Result<BenchmarkResult> {
+    // Just return the BenchmarkResult (the raw JSON is already in the `raw` field)
     use crate::benchmarks::Benchmark;
-    CodingEvalBenchmark.to_report_result(raw)
+    CodingEvalBenchmark.to_report_result(b)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,12 +255,13 @@ impl super::Benchmark for CodingEvalBenchmark {
         Ok(())
     }
 
-    fn execute(&self, _model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, _model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         // CodingEvalBenchmark is not meant to be run directly; use HumanEvalBenchmark etc.
         Err(anyhow::anyhow!("CodingEvalBenchmark execute: not directly runnable. Use HumanEval, HumanEval+, or MBPP+ instead."))
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
 
         let pass_at_1 = raw.get("pass_at_1").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -409,9 +410,9 @@ impl super::Benchmark for HumanEvalBenchmark {
         crate::reports::model::BenchmarkCategory::ShortContextCoding
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         // Delegate to the common implementation in CodingEvalBenchmark
-        common_coding_to_report_result(raw)
+        common_coding_to_report_result(b)
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
@@ -419,7 +420,7 @@ impl super::Benchmark for HumanEvalBenchmark {
         CodingEvalBenchmark.pre_execute(&cfg)
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let cfg = preset_config(config, "humaneval", TaskType::HumanEval);
         CodingEvalBenchmark.execute(model, &cfg)
     }
@@ -438,9 +439,9 @@ impl super::Benchmark for HumanEvalPlusBenchmark {
         crate::reports::model::BenchmarkCategory::ShortContextCoding
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         // Delegate to the common implementation in CodingEvalBenchmark
-        common_coding_to_report_result(raw)
+        common_coding_to_report_result(b)
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
@@ -448,7 +449,7 @@ impl super::Benchmark for HumanEvalPlusBenchmark {
         CodingEvalBenchmark.pre_execute(&cfg)
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let cfg = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
         CodingEvalBenchmark.execute(model, &cfg)
     }
@@ -467,9 +468,9 @@ impl super::Benchmark for MbppPlusBenchmark {
         crate::reports::model::BenchmarkCategory::ShortContextCoding
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         // Delegate to the common implementation in CodingEvalBenchmark
-        common_coding_to_report_result(raw)
+        common_coding_to_report_result(b)
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
@@ -477,7 +478,7 @@ impl super::Benchmark for MbppPlusBenchmark {
         CodingEvalBenchmark.pre_execute(&cfg)
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let cfg = preset_config(config, "mbpp_plus", TaskType::Mbpp);
         CodingEvalBenchmark.execute(model, &cfg)
     }

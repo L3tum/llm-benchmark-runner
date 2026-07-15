@@ -102,7 +102,8 @@ impl super::Benchmark for SuperGpqaBenchmark {
         Ok(())
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let total_questions = raw
             .get("total_questions")
@@ -210,7 +211,7 @@ impl super::Benchmark for SuperGpqaBenchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
         let subjects_filter = config.get("subjects");
@@ -394,7 +395,7 @@ impl super::Benchmark for SuperGpqaBenchmark {
             0.0
         };
 
-        Ok(serde_json::json!({
+        let raw_json = serde_json::json!({
             "accuracy": overall_accuracy,
             "results_by_discipline": serde_json::Value::Object(build_category_record(&discipline_correct, &discipline_total)),
             "results_by_field": serde_json::Value::Object(build_category_record(&field_correct, &field_total)),
@@ -403,7 +404,16 @@ impl super::Benchmark for SuperGpqaBenchmark {
             "total_questions": total_questions,
             "output_tokens": total_output_tokens,
             "thinking_tokens": total_thinking_tokens,
-        }))
+        });
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw_json,
+        })
     }
 }
 

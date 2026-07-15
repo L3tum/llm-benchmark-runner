@@ -15,7 +15,7 @@ use crate::reports::html::HtmlReportGenerator;
 use crate::reports::markdown::MarkdownReportGenerator;
 use crate::reports::model::{BenchmarkResult, ReportInput, ScoreValue, TestName, TestReportData};
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -48,22 +48,16 @@ fn slugify_name(name: String) -> String {
         .to_string()
 }
 
-/// Build a `ReportInput` from the legacy results JSON, delegating extraction
-/// to each benchmark's `to_report_result` and `to_report_aggregate` methods.
-fn build_report_input(results: &serde_json::Value) -> Result<ReportInput> {
-    let models_evaluated: Vec<String> = results
-        .get("models")
-        .and_then(|v| v.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default();
-
+/// Build a `ReportInput` from in-memory `BenchmarkResult` objects.
+fn build_report_input(
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+    post_execute_results: &HashMap<String, BenchmarkResult>,
+) -> ReportInput {
+    let models_evaluated: Vec<String> = all_models_results.keys().cloned().collect();
     let timestamp = chrono::Utc::now()
         .format("%Y-%m-%d %H:%M:%S UTC")
         .to_string();
 
-    let mut tests = BTreeMap::new();
-
-    // For each benchmark, get its results from the top-level JSON and delegate to the benchmark.
     let benchmarks: Vec<&dyn crate::benchmarks::Benchmark> = vec![
         &MmluProBenchmark,
         &GpqaBenchmark,
@@ -77,40 +71,35 @@ fn build_report_input(results: &serde_json::Value) -> Result<ReportInput> {
         &KldBenchmark,
     ];
 
+    let mut tests = BTreeMap::new();
+
     for benchmark in benchmarks {
-        let raw = results
+        // Collect per-model BenchmarkResult for this benchmark
+        let mut model_results: BTreeMap<String, BenchmarkResult> = BTreeMap::new();
+
+        for (model_name, bench_results) in all_models_results {
+            if let Some(bench_result) = bench_results.get(benchmark.name()) {
+                // Call to_report_result on the in-memory result
+                match benchmark.to_report_result(bench_result) {
+                    Ok(result) => {
+                        model_results.insert(model_name.clone(), result);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to convert {} result for {}: {}",
+                            benchmark.name(),
+                            model_name,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Aggregate results (from post_execute)
+        let aggregate = post_execute_results
             .get(benchmark.name())
-            .ok_or_else(|| anyhow::anyhow!("Missing {} results in JSON", benchmark.name()))?;
-
-        // Model-level results
-        let raw_models = raw
-            .get("models")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let model_results: BTreeMap<String, BenchmarkResult> =
-            if let Some(obj) = raw_models.as_object() {
-                obj.iter()
-                    .filter_map(|(model, raw_result)| {
-                        match benchmark.to_report_result(raw_result) {
-                            Ok(result) => Some((model.clone(), result)),
-                            Err(e) => {
-                                eprintln!(
-                                    "Warning: Failed to convert {} result for {}: {}",
-                                    benchmark.name(),
-                                    model,
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    })
-                    .collect()
-            } else {
-                BTreeMap::new()
-            };
-
-        // Aggregate (e.g., KLD pairwise)
-        let aggregate = benchmark.to_report_aggregate(raw).ok().flatten();
+            .and_then(|post_result| benchmark.to_report_aggregate(post_result).ok().flatten());
 
         if !model_results.is_empty() || aggregate.is_some() {
             tests.insert(
@@ -126,16 +115,36 @@ fn build_report_input(results: &serde_json::Value) -> Result<ReportInput> {
         }
     }
 
-    // Generate summary from the built test data
     let summary = generate_summary_from_tests(&tests);
 
-    Ok(ReportInput {
+    // Build the raw results JSON for backwards compatibility
+    let raw_results = build_raw_results_json(all_models_results);
+
+    ReportInput {
         generated_at: timestamp,
         models: models_evaluated,
         tests,
         summary,
-        raw_results: results.clone(),
-    })
+        raw_results,
+    }
+}
+
+/// Build raw JSON from in-memory results for backwards compatibility and saving.
+fn build_raw_results_json(
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+) -> serde_json::Value {
+    let mut models = serde_json::Map::new();
+    for (model_name, bench_results) in all_models_results {
+        let mut bench_json = serde_json::Map::new();
+        for (bench_name, result) in bench_results {
+            bench_json.insert(bench_name.clone(), serde_json::to_value(result).unwrap());
+        }
+        models.insert(
+            model_name.clone(),
+            serde_json::json!({ "benchmarks": bench_json }),
+        );
+    }
+    serde_json::json!({ "models": models })
 }
 
 fn parse_optional_tokens(s: &str) -> Option<i64> {
@@ -259,41 +268,70 @@ fn generate_summary_from_tests(tests: &BTreeMap<TestName, TestReportData>) -> Ve
     summary
 }
 
-fn render_report_html(results: &serde_json::Value) -> Result<String> {
-    let input = build_report_input(results)?;
+fn render_report_html(
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+    post_execute_results: &HashMap<String, BenchmarkResult>,
+) -> Result<String> {
+    let input = build_report_input(all_models_results, post_execute_results);
     let ctx = ReportContext { input: &input };
     HtmlReportGenerator.generate(&ctx)
 }
 
-fn render_markdown_report(results: &serde_json::Value) -> Result<String> {
-    let input = build_report_input(results)?;
+fn render_markdown_report(
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+    post_execute_results: &HashMap<String, BenchmarkResult>,
+) -> Result<String> {
+    let input = build_report_input(all_models_results, post_execute_results);
     let ctx = ReportContext { input: &input };
     MarkdownReportGenerator.generate(&ctx)
 }
 
-fn render_console_report(results: &serde_json::Value) -> Result<String> {
-    let input = build_report_input(results)?;
+fn render_console_report(
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+    post_execute_results: &HashMap<String, BenchmarkResult>,
+) -> Result<String> {
+    let input = build_report_input(all_models_results, post_execute_results);
     let ctx = ReportContext { input: &input };
     ConsoleReportGenerator.generate(&ctx)
 }
 
+/// Filter the in-memory results to only include models in the comparison.
+fn filter_comparison_models(
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+    comparison: &Comparison,
+) -> HashMap<String, HashMap<String, BenchmarkResult>> {
+    let model_names: Vec<String> = comparison.models.clone();
+    if model_names.is_empty() {
+        return all_models_results.clone();
+    }
+
+    all_models_results
+        .iter()
+        .filter(|(name, _)| model_names.contains(name))
+        .map(|(name, results)| (name.clone(), results.clone()))
+        .collect()
+}
+
+/// Generate all reports (HTML, Markdown, comparison reports) from in-memory results.
 pub fn generate_reports(
-    results: &serde_json::Value,
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
     output_dir: &Path,
     comparisons: &[Comparison],
+    post_execute_results: &HashMap<String, BenchmarkResult>,
 ) -> Result<()> {
     // Main HTML report
-    let html = render_report_html(results)?;
+    let html = render_report_html(all_models_results, post_execute_results)?;
     fs::write(output_dir.join("benchmark_report.html"), html)?;
     println!("HTML report: benchmark_report.html");
 
     // Markdown report
-    let md = render_markdown_report(results)?;
+    let md = render_markdown_report(all_models_results, post_execute_results)?;
     fs::write(output_dir.join("benchmark_report.md"), md)?;
     println!("Markdown report: benchmark_report.md");
 
-    // Save raw results as JSON
-    let json = serde_json::to_string_pretty(results)?;
+    // Save raw results as JSON (for backwards compatibility)
+    let raw_json = build_raw_results_json(all_models_results);
+    let json = serde_json::to_string_pretty(&raw_json)?;
     fs::write(output_dir.join("results.json"), json)?;
     println!("Raw results: results.json");
 
@@ -308,93 +346,90 @@ pub fn generate_reports(
         } else {
             format!("comparison-{}.html", slug)
         };
-        generate_comparison_report(results, output_dir, &filename, comparison)?;
+        generate_comparison_report(
+            all_models_results,
+            output_dir,
+            &filename,
+            comparison,
+            post_execute_results,
+        )?;
     }
     Ok(())
 }
 
-/// Filter the results JSON to only include models in the comparison.
-pub fn filter_comparison_results(
-    results: &serde_json::Value,
-    comparison: &Comparison,
-) -> serde_json::Value {
-    let model_names: Vec<String> = comparison.models.clone();
-    if model_names.is_empty() {
-        return results.clone();
-    }
-
-    let mut filtered: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(results).unwrap()).unwrap();
-
-    if let Some(models_obj) = filtered.get_mut("models").and_then(|v| v.as_object_mut()) {
-        // Retain only models that are in the comparison
-        models_obj.retain(|key, _| model_names.contains(key));
-    }
-
-    // Filter KLD pairwise results (legacy top-level structure)
-    if let Some(kld_results) = filtered.get("kld_pairwise") {
-        let kld_filtered = filter_kld_results(kld_results, &model_names);
-        filtered["kld_pairwise"] = kld_filtered;
-    }
-
-    filtered
-}
-
-/// Filter KLD pairwise results to only include models in the comparison.
-fn filter_kld_results(
-    kld_results: &serde_json::Value,
-    model_names: &[String],
-) -> serde_json::Value {
-    let mut filtered = serde_json::Map::new();
-
-    if let Some(pairwise) = kld_results.get("pairwise").and_then(|v| v.as_object()) {
-        let new_pairwise: serde_json::Map<String, serde_json::Value> = pairwise
-            .iter()
-            .filter(|(key, _)| {
-                if let Some((a, b)) = key.split_once('_') {
-                    model_names.contains(&a.to_string()) && model_names.contains(&b.to_string())
-                } else {
-                    false
-                }
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        filtered.insert(
-            "pairwise".to_string(),
-            serde_json::Value::Object(new_pairwise),
-        );
-    }
-
-    if let Some(avg) = kld_results
-        .get("avg_kld_to_others")
-        .and_then(|v| v.as_object())
-    {
-        let filtered_avg: serde_json::Map<String, serde_json::Value> = avg
-            .iter()
-            .filter(|(name, _)| model_names.contains(name))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        filtered.insert(
-            "avg_kld_to_others".to_string(),
-            serde_json::Value::Object(filtered_avg),
-        );
-    }
-
-    serde_json::Value::Object(filtered)
-}
-
 /// Generate a comparison report HTML file containing only the specified models,
-/// filtered from the results JSON.
+/// filtered from the in-memory results.
 pub fn generate_comparison_report(
-    results: &serde_json::Value,
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
     output_dir: &Path,
     filename: &str,
     comparison: &Comparison,
+    post_execute_results: &HashMap<String, BenchmarkResult>,
 ) -> Result<()> {
-    let filtered_results = filter_comparison_results(results, comparison);
-    let html = render_report_html(&filtered_results)?;
+    let filtered_models = filter_comparison_models(all_models_results, comparison);
+    let filtered_post = filter_post_execute_results(post_execute_results, comparison);
+    let html = render_report_html(&filtered_models, &filtered_post)?;
     let filepath = output_dir.join(filename);
     fs::write(&filepath, html)?;
     println!("Comparison report: {}", filepath.display());
     Ok(())
+}
+
+/// Filter post-execute results to include only models relevant to the comparison.
+fn filter_post_execute_results(
+    post_execute_results: &HashMap<String, BenchmarkResult>,
+    comparison: &Comparison,
+) -> HashMap<String, BenchmarkResult> {
+    let model_names: Vec<String> = comparison.models.clone();
+    if model_names.is_empty() {
+        return post_execute_results.clone();
+    }
+
+    post_execute_results
+        .iter()
+        .map(|(bench_name, result)| {
+            // For benchmarks like KLD that have a breakdown table with pairwise scores,
+            // we need to filter the breakdown rows to only include pairs from the comparison.
+            let filtered_result = if bench_name == "kld" {
+                let mut filtered = result.clone();
+                if let Some(breakdown) = filtered.breakdowns.get_mut("pairwise_kld") {
+                    // Filter pairwise rows to only include pairs where both models are in the comparison
+                    let filtered_rows = breakdown
+                        .rows
+                        .iter()
+                        .filter(|(key, _)| {
+                            if let Some((a, b)) = key.split_once('_') {
+                                model_names.contains(&a.to_string())
+                                    && model_names.contains(&b.to_string())
+                            } else {
+                                false
+                            }
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    breakdown.rows = filtered_rows;
+                    // Also filter avg_kld_to_others from the raw field
+                    if let Some(raw_obj) = result.raw.as_object() {
+                        let filtered_avg = raw_obj
+                            .get("avg_kld_to_others")
+                            .and_then(|v| v.as_object())
+                            .map(|avg| {
+                                avg.iter()
+                                    .filter(|(name, _)| model_names.contains(name))
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect::<serde_json::Map<_, _>>()
+                            });
+                        if let Some(filtered_avg) = filtered_avg {
+                            filtered.raw["avg_kld_to_others"] =
+                                serde_json::Value::Object(filtered_avg);
+                        }
+                    }
+                }
+                filtered
+            } else {
+                result.clone()
+            };
+            (bench_name.clone(), filtered_result)
+        })
+        .collect()
 }

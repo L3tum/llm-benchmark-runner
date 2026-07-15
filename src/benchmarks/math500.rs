@@ -45,7 +45,8 @@ impl super::Benchmark for Math500Benchmark {
         Ok(())
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
 
         let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -129,7 +130,7 @@ impl super::Benchmark for Math500Benchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
         let subjects_filter = config.get("subjects");
@@ -241,13 +242,23 @@ impl super::Benchmark for Math500Benchmark {
             0.0
         };
 
-        Ok(serde_json::json!({
+        // Build raw JSON
+        let raw_json = serde_json::json!({
             "accuracy": overall_accuracy,
             "results_by_subject": category_record,
             "total_questions": total_questions,
             "output_tokens": total_output_tokens,
             "thinking_tokens": total_thinking_tokens,
-        }))
+        });
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw_json,
+        })
     }
 }
 

@@ -256,7 +256,8 @@ impl super::Benchmark for MinebenchBenchmark {
         crate::reports::model::BenchmarkCategory::Creative
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         use crate::reports::model::{Artifact, Score, ScoreUnit};
 
         let json_valid = raw
@@ -331,7 +332,7 @@ impl super::Benchmark for MinebenchBenchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let buildings = configured_buildings(config)?;
 
@@ -396,7 +397,7 @@ impl super::Benchmark for MinebenchBenchmark {
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
 
-        Ok(serde_json::json!({
+        let raw_json = serde_json::json!({
             "json_valid": json_valid,
             "valid_buildings": valid_buildings,
             "total_buildings": total_buildings,
@@ -404,18 +405,28 @@ impl super::Benchmark for MinebenchBenchmark {
             "thinking_tokens": total_thinking_tokens,
             "output_files": output_files,
             "buildings": serde_json::Value::Object(building_results),
-        }))
+        });
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw_json,
+        })
     }
 
     fn post_execute(
         &self,
-        model_results: &HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value> {
+        model_results: &HashMap<String, BenchmarkResult>,
+    ) -> Result<BenchmarkResult> {
         fs::create_dir_all("output")?;
         let mut outputs = serde_json::Map::new();
 
-        for (model_name, data) in model_results {
-            let Some(minebench) = data.get("minebench") else {
+        for (model_name, b) in model_results {
+            let raw = &b.raw;
+            let Some(minebench) = raw.get("minebench") else {
                 continue;
             };
 
@@ -476,7 +487,15 @@ impl super::Benchmark for MinebenchBenchmark {
             outputs.insert(model_name.clone(), serde_json::Value::Object(model_outputs));
         }
 
-        Ok(serde_json::json!({ "minebench_outputs": outputs }))
+        let raw_json = serde_json::json!({ "minebench_outputs": outputs });
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw_json,
+        })
     }
 }
 

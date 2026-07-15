@@ -102,7 +102,8 @@ impl super::Benchmark for SweBenchBenchmark {
         crate::reports::model::BenchmarkCategory::LongContextCoding
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         use crate::reports::model::{Score, ScoreUnit};
 
         let resolution_rate = raw
@@ -167,7 +168,7 @@ impl super::Benchmark for SweBenchBenchmark {
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         execute_swebench(SweBenchDataset::Basic, model, config)
     }
 }
@@ -185,7 +186,8 @@ impl super::Benchmark for SweBenchVerifiedBenchmark {
         crate::reports::model::BenchmarkCategory::LongContextCoding
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         use crate::reports::model::{Score, ScoreUnit};
 
         let resolution_rate = raw
@@ -250,7 +252,7 @@ impl super::Benchmark for SweBenchVerifiedBenchmark {
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         execute_swebench(SweBenchDataset::Verified, model, config)
     }
 }
@@ -268,7 +270,8 @@ impl super::Benchmark for SweBenchProBenchmark {
         crate::reports::model::BenchmarkCategory::LongContextCoding
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         use crate::reports::model::{BenchmarkResult, Score, ScoreUnit};
 
         let resolution_rate = raw
@@ -333,7 +336,7 @@ impl super::Benchmark for SweBenchProBenchmark {
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         execute_swebench(SweBenchDataset::Pro, model, config)
     }
 }
@@ -342,7 +345,7 @@ fn execute_swebench(
     dataset: SweBenchDataset,
     model: &Model,
     config: &yaml_serde::Value,
-) -> Result<serde_json::Value> {
+) -> Result<BenchmarkResult> {
     let cfg = parse_config(dataset, config)?;
     prepare_swebench(&cfg)?;
     let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
@@ -397,7 +400,7 @@ fn execute_swebench(
         resolved as f64 / total as f64
     };
 
-    Ok(serde_json::json!({
+    let raw_json = serde_json::json!({
         "dataset": cfg.dataset.benchmark_name(),
         "dataset_id": cfg.dataset_id,
         "split": cfg.split,
@@ -414,7 +417,16 @@ fn execute_swebench(
         "output_tokens": total_output_tokens,
         "thinking_tokens": total_thinking_tokens,
         "instances": instance_rows,
-    }))
+    });
+
+    Ok(BenchmarkResult {
+        scores: BTreeMap::new(), // to_report_result will fill this in
+        breakdowns: BTreeMap::new(),
+        error_classification: BTreeMap::new(),
+        artifacts: vec![],
+        diagnostics: vec![],
+        raw: raw_json,
+    })
 }
 
 #[derive(Debug, Clone)]

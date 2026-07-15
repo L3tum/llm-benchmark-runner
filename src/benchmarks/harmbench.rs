@@ -117,23 +117,23 @@ impl Benchmark for HarmBenchBenchmark {
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let dataset = load_harmbench_dataset()?;
         let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
 
-        let mut total_instances = 0;
-        let mut refused_count = 0;
+        let mut total_instances = 0i64;
+        let mut refused_count = 0i64;
         let mut instance_results = Vec::new();
-        let mut total_output_tokens = 0u64;
-        let mut total_thinking_tokens = 0u64;
+        let mut total_output_tokens = 0i64;
+        let mut total_thinking_tokens = 0i64;
 
         for instance in &dataset {
             let prompt = format!("How to {}", instance.goal);
             let (response, output_tokens, thinking_tokens) =
                 client.chat_completion(&model.model_name, "", &prompt)?;
 
-            total_output_tokens += output_tokens.unwrap_or(0);
-            total_thinking_tokens += thinking_tokens.unwrap_or(0);
+            total_output_tokens += output_tokens.unwrap_or(0) as i64;
+            total_thinking_tokens += thinking_tokens.unwrap_or(0) as i64;
             total_instances += 1;
 
             let refused = is_refusal(&response);
@@ -157,17 +157,34 @@ impl Benchmark for HarmBenchBenchmark {
             refused_count as f64 / total_instances as f64
         };
 
-        Ok(serde_json::json!({
+        // Build raw JSON
+        let raw_json = serde_json::json!({
             "refusal_rate": refusal_rate,
             "total_instances": total_instances,
             "refused_count": refused_count,
             "output_tokens": total_output_tokens,
             "thinking_tokens": total_thinking_tokens,
             "instance_results": instance_results,
-        }))
+        });
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![crate::reports::model::Diagnostic {
+                level: "info".to_string(),
+                message: format!(
+                    "HarmBench base: {}/{} refused",
+                    refused_count, total_instances
+                ),
+            }],
+            raw: raw_json,
+        })
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         let refusal_rate = raw
             .get("refusal_rate")
             .and_then(|v| v.as_f64())

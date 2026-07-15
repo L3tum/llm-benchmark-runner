@@ -1,6 +1,7 @@
 use crate::benchmarks;
 use crate::client::Client;
 use crate::config::{self, DockerConfig, Model};
+use crate::reports::model::{BenchmarkResult, Diagnostic};
 use crate::utils::format_duration;
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -15,8 +16,8 @@ use std::time::{Duration, Instant};
 /// Used by the ctrl-c handler to stop the model gracefully.
 pub static CURRENT_MODEL_PID: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 
-/// Returns (model_results_json, successful_benchmarks, failed_benchmarks, per_bench_timings)
-/// per_bench_timings: HashMap<benchmark_name, Vec<Duration>> for this model's run
+/// Runs a model through the given benchmarks and returns (model_results, successful, failed, timings).
+/// model_results is a HashMap from benchmark name to the in-memory BenchmarkResult.
 // ponytail: suppress type_complexity, tuple return is shortest code
 #[allow(clippy::type_complexity)]
 pub fn run_model(
@@ -26,7 +27,7 @@ pub fn run_model(
     docker_config: &DockerConfig,
     completed_benchmarks: &[String],
 ) -> Result<(
-    serde_json::Value,
+    HashMap<String, BenchmarkResult>,
     Vec<String>,
     Vec<String>,
     HashMap<String, Vec<Duration>>,
@@ -40,7 +41,7 @@ pub fn run_model(
         return Err(anyhow::anyhow!("Proxy did not become healthy"));
     }
 
-    let mut model_results: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut model_results: HashMap<String, BenchmarkResult> = HashMap::new();
     let mut new_successful = completed_benchmarks.to_vec();
     let mut new_failed = Vec::new();
     let mut per_bench_timings: HashMap<String, Vec<Duration>> = HashMap::new();
@@ -68,20 +69,36 @@ pub fn run_model(
                 }
                 Err(e) => {
                     eprintln!("  ERROR: {} - {}", bench_name, e);
-                    model_results.insert(
-                        bench_name.to_string(),
-                        serde_json::json!({"error": e.to_string()}),
-                    );
+                    let error_result = BenchmarkResult {
+                        scores: std::collections::BTreeMap::new(),
+                        breakdowns: std::collections::BTreeMap::new(),
+                        error_classification: std::collections::BTreeMap::new(),
+                        artifacts: vec![],
+                        diagnostics: vec![Diagnostic {
+                            level: "error".to_string(),
+                            message: e.to_string(),
+                        }],
+                        raw: serde_json::json!({"error": e.to_string()}),
+                    };
+                    model_results.insert(bench_name.to_string(), error_result);
                     new_failed.push(bench_name.to_string());
                 }
             }
         } else {
             let message = "proxy not healthy before benchmark execution";
             eprintln!("  ERROR: {} - {}", bench_name, message);
-            model_results.insert(
-                bench_name.to_string(),
-                serde_json::json!({"error": message}),
-            );
+            let error_result = BenchmarkResult {
+                scores: std::collections::BTreeMap::new(),
+                breakdowns: std::collections::BTreeMap::new(),
+                error_classification: std::collections::BTreeMap::new(),
+                artifacts: vec![],
+                diagnostics: vec![Diagnostic {
+                    level: "error".to_string(),
+                    message: message.to_string(),
+                }],
+                raw: serde_json::json!({"error": message}),
+            };
+            model_results.insert(bench_name.to_string(), error_result);
             new_failed.push(bench_name.to_string());
         }
         let bench_duration = bench_start.elapsed();
@@ -124,12 +141,7 @@ pub fn run_model(
     println!("  Stopping model: {}", model.display_name);
     process_guard.stop();
 
-    Ok((
-        serde_json::json!(model_results),
-        new_successful,
-        new_failed,
-        per_bench_timings,
-    ))
+    Ok((model_results, new_successful, new_failed, per_bench_timings))
 }
 #[cfg(unix)]
 pub fn start_model(cmd: &str) -> Result<Child> {

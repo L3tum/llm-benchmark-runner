@@ -82,7 +82,8 @@ impl super::Benchmark for MmluProBenchmark {
         Ok(())
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
 
         let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -190,7 +191,7 @@ impl super::Benchmark for MmluProBenchmark {
         })
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
         let subjects_filter = config.get("subjects");
@@ -336,20 +337,28 @@ impl super::Benchmark for MmluProBenchmark {
             0.0
         };
 
-        // Error classification map: convert typed map to display names for raw JSON
+        // Build raw JSON
         let error_classification_display: BTreeMap<String, i64> = overall_wrong_classes
             .iter()
             .map(|(k, v)| (k.display().to_string(), *v))
             .collect();
-
-        Ok(serde_json::json!({
+        let raw_json = serde_json::json!({
             "accuracy": overall_accuracy,
             "results_by_subject": category_record,
             "total_questions": total_questions,
             "output_tokens": total_output_tokens,
             "thinking_tokens": total_thinking_tokens,
             "error_classification": error_classification_display,
-        }))
+        });
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: overall_wrong_classes,
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw_json,
+        })
     }
 }
 

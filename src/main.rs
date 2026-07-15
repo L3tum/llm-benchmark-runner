@@ -12,6 +12,7 @@ mod utils;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use reports::model::BenchmarkResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -121,7 +122,7 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     // Build completed and failed benchmark tracking per model
     let mut completed_benchmarks_per_model: HashMap<String, Vec<String>> = HashMap::new();
     let mut failed_benchmarks_per_model: HashMap<String, Vec<String>> = HashMap::new();
-    let mut all_models_results: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut all_models_results: HashMap<String, HashMap<String, BenchmarkResult>> = HashMap::new();
 
     // Global timing map: benchmark name -> durations (across all models)
     let mut global_timings: HashMap<String, Vec<std::time::Duration>> = HashMap::new();
@@ -144,7 +145,18 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
                         .collect();
                     failed_benchmarks_per_model.insert(name.clone(), bench_names);
                 }
-                all_models_results.insert(name.clone(), data.clone());
+                // Deserialize the BenchmarkResult objects from the saved JSON
+                let mut per_model_benchmarks: HashMap<String, BenchmarkResult> = HashMap::new();
+                if let Some(benchmark_data) = data.get("benchmarks").and_then(|v| v.as_object()) {
+                    for (bench_name, bench_result) in benchmark_data {
+                        if let Ok(result) =
+                            serde_json::from_value::<BenchmarkResult>(bench_result.clone())
+                        {
+                            per_model_benchmarks.insert(bench_name.clone(), result);
+                        }
+                    }
+                }
+                all_models_results.insert(name.clone(), per_model_benchmarks);
             }
         }
     }
@@ -255,10 +267,10 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             eta_str
         );
 
-        let status = if model_result.as_object().is_some_and(|m| !m.is_empty()) {
-            "completed"
-        } else {
+        let status = if model_result.is_empty() {
             "error"
+        } else {
+            "completed"
         };
         let mut model_data = serde_json::Map::new();
         model_data.insert("status".to_string(), serde_json::json!(status));
@@ -270,16 +282,29 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             "benchmarks_failed".to_string(),
             serde_json::json!(new_failed.clone()),
         );
-        if let Some(obj) = model_result.as_object() {
-            for (k, v) in obj {
-                model_data.insert(k.clone(), v.clone());
-            }
+        // Serialize each benchmark result to JSON and add to the model data
+        let mut bench_results = serde_json::Map::new();
+        for (bench_name, result) in &model_result {
+            bench_results.insert(
+                bench_name.clone(),
+                serde_json::to_value(result).unwrap_or(serde_json::json!(null)),
+            );
         }
-        all_models_results.insert(
-            model.display_name.clone(),
-            serde_json::Value::Object(model_data),
+        model_data.insert(
+            "benchmarks".to_string(),
+            serde_json::Value::Object(bench_results),
         );
-        save_results(&all_models_results, &serde_json::Map::new(), RESULTS_FILE)?;
+
+        // Update in-memory results
+        all_models_results.insert(model.display_name.clone(), model_result);
+
+        save_results(
+            &all_models_results,
+            &model_data,
+            &new_successful,
+            &new_failed,
+            RESULTS_FILE,
+        )?;
     }
 
     // Total runtime for the entire run
@@ -287,16 +312,39 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     let runtime_str = utils::format_duration(total_runtime);
     println!("\nTotal runtime: {}", runtime_str);
 
-    // Post-execute
+    // Post-execute for each benchmark
     println!("\nPost-execution phase:");
-    let mut kld_pairwise = serde_json::Map::new();
+    let mut kld_pairwise: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    let mut post_execute_results: HashMap<String, BenchmarkResult> = HashMap::new();
     for bench_name in &benchmarks {
-        match benchmarks::post_execute_benchmark(bench_name, &all_models_results) {
+        // Collect results from all models for this benchmark
+        let model_results: HashMap<String, BenchmarkResult> = all_models_results
+            .iter()
+            .filter_map(|(model_name, bench_results)| {
+                bench_results
+                    .get(bench_name)
+                    .map(|result| (model_name.clone(), result.clone()))
+            })
+            .collect();
+
+        if model_results.is_empty() {
+            eprintln!(
+                "Warning: No model results for benchmark {}, skipping post_execute",
+                bench_name
+            );
+            continue;
+        }
+
+        match benchmarks::post_execute_benchmark(bench_name, &model_results) {
             Ok(post_result) => {
+                post_execute_results.insert(bench_name.clone(), post_result.clone());
                 if bench_name == "kld" {
-                    if let Some(map) = post_result.as_object() {
-                        for (k, v) in map {
-                            kld_pairwise.insert(k.clone(), v.clone());
+                    // Extract raw JSON from the KLD post-execute result
+                    if let Ok(value) = serde_json::to_value(&post_result) {
+                        if let Some(map) = value.as_object() {
+                            for (k, v) in map {
+                                kld_pairwise.insert(k.clone(), v.clone());
+                            }
                         }
                     }
                 }
@@ -306,15 +354,46 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             }
         }
     }
-    let final_results = serde_json::json!({
-        "models": all_models_results,
-        "kld_pairwise": kld_pairwise,
-    });
-    save_results(&all_models_results, &kld_pairwise, RESULTS_FILE)?;
 
+    // Save final results JSON (with both models and kld_pairwise)
+    // and pass the in-memory results to report generation
     let output_dir = Path::new("benchmark_results");
     fs::create_dir_all(output_dir)?;
-    report::generate_reports(&final_results, output_dir, &config.comparisons)?;
+
+    // Build the final JSON for saving: models with all benchmark results + kld_pairwise
+    let mut models_json = serde_json::Map::new();
+    for (model_name, bench_results) in &all_models_results {
+        let mut model_data = serde_json::Map::new();
+        let mut bench_json = serde_json::Map::new();
+        for (bench_name, result) in bench_results {
+            bench_json.insert(
+                bench_name.clone(),
+                serde_json::to_value(result).unwrap_or(serde_json::json!(null)),
+            );
+        }
+        model_data.insert(
+            "benchmarks".to_string(),
+            serde_json::Value::Object(bench_json),
+        );
+        models_json.insert(model_name.clone(), serde_json::Value::Object(model_data));
+    }
+    let final_results = serde_json::json!({
+        "models": models_json,
+        "kld_pairwise": kld_pairwise,
+    });
+    // Write to file using the same save_results signature (we need to adapt save_results first)
+    let tmp_path = format!("{}.tmp", RESULTS_FILE);
+    let json = serde_json::to_string_pretty(&final_results)?;
+    fs::write(&tmp_path, json)?;
+    fs::rename(&tmp_path, RESULTS_FILE)?;
+
+    // Generate reports from in-memory results, passing per-benchmark, per-model BenchmarkResult objects
+    report::generate_reports(
+        &all_models_results,
+        output_dir,
+        &config.comparisons,
+        &post_execute_results,
+    )?;
     println!("\nBenchmark complete.");
     Ok(())
 }
@@ -449,11 +528,35 @@ fn load_existing_results(path: &str) -> Result<Option<serde_json::Value>> {
 }
 
 fn save_results(
-    models: &HashMap<String, serde_json::Value>,
-    kld_pairwise: &serde_json::Map<String, serde_json::Value>,
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+    _model_data: &serde_json::Map<String, serde_json::Value>,
+    new_successful: &Vec<String>,
+    new_failed: &Vec<String>,
     path: &str,
 ) -> Result<()> {
-    let result = serde_json::json!({ "models": models, "kld_pairwise": kld_pairwise });
+    // Convert all_models_results to serde_json::Value
+    let models_json: serde_json::Map<String, serde_json::Value> = all_models_results
+        .iter()
+        .map(|(model_name, bench_results)| {
+            let bench_values: serde_json::Map<String, serde_json::Value> = bench_results
+                .iter()
+                .map(|(bench_name, result)| {
+                    (
+                        bench_name.clone(),
+                        serde_json::to_value(result).unwrap_or(serde_json::json!(null)),
+                    )
+                })
+                .collect();
+            let model_value = serde_json::json!({
+                "benchmarks": bench_values,
+                "new_successful": new_successful,
+                "new_failed": new_failed,
+            });
+            (model_name.clone(), model_value)
+        })
+        .collect();
+
+    let result = serde_json::json!({ "models": models_json });
     let tmp_path = format!("{}.tmp", path);
     let json = serde_json::to_string_pretty(&result)?;
     fs::write(&tmp_path, json)?;
@@ -462,8 +565,9 @@ fn save_results(
 }
 
 fn generate_report(results_path: &str, output_dir: &str, config_path: &str) -> Result<()> {
+    // Load JSON and convert to in-memory BenchmarkResult objects
     let content = fs::read_to_string(results_path)?;
-    let results: serde_json::Value = serde_json::from_str(&content)?;
+    let results_json: serde_json::Value = serde_json::from_str(&content)?;
     let output_path = Path::new(output_dir);
     fs::create_dir_all(output_path)?;
     // Load config for comparisons
@@ -472,7 +576,41 @@ fn generate_report(results_path: &str, output_dir: &str, config_path: &str) -> R
     } else {
         Vec::new()
     };
-    report::generate_reports(&results, output_path, &comparisons)?;
+    // Deserialize the models and benchmarks into BenchmarkResult objects
+    let all_models_results: HashMap<String, HashMap<String, BenchmarkResult>> = results_json
+        .get("models")
+        .and_then(|v| v.as_object())
+        .map(|models_obj| {
+            models_obj
+                .iter()
+                .filter_map(|(model_name, model_data)| {
+                    model_data
+                        .get("benchmarks")
+                        .and_then(|v| v.as_object())
+                        .map(|benchmarks_obj| {
+                            let bench_results: HashMap<String, BenchmarkResult> = benchmarks_obj
+                                .iter()
+                                .filter_map(|(bench_name, bench_result)| {
+                                    serde_json::from_value(bench_result.clone())
+                                        .ok()
+                                        .map(|r| (bench_name.clone(), r))
+                                })
+                                .collect();
+                            (model_name.clone(), bench_results)
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // No post-execute aggregate when running report from JSON; just pass empty post_execute_results
+    let post_execute_results: HashMap<String, BenchmarkResult> = HashMap::new();
+    report::generate_reports(
+        &all_models_results,
+        output_path,
+        &comparisons,
+        &post_execute_results,
+    )?;
     Ok(())
 }
 
@@ -488,12 +626,42 @@ fn generate_comparison_reports(
         return Ok(());
     }
 
+    // Load JSON and deserialize to in-memory BenchmarkResult objects
     let content = fs::read_to_string(results_path)?;
-    let results: serde_json::Value = serde_json::from_str(&content)?;
+    let results_json: serde_json::Value = serde_json::from_str(&content)?;
     let output_path = Path::new(output_dir);
     fs::create_dir_all(output_path)?;
 
-    // Generate only comparison reports (no main report)
+    let all_models_results: HashMap<String, HashMap<String, BenchmarkResult>> = results_json
+        .get("models")
+        .and_then(|v| v.as_object())
+        .map(|models_obj| {
+            models_obj
+                .iter()
+                .filter_map(|(model_name, model_data)| {
+                    model_data
+                        .get("benchmarks")
+                        .and_then(|v| v.as_object())
+                        .map(|benchmarks_obj| {
+                            let bench_results: HashMap<String, BenchmarkResult> = benchmarks_obj
+                                .iter()
+                                .filter_map(|(bench_name, bench_result)| {
+                                    serde_json::from_value(bench_result.clone())
+                                        .ok()
+                                        .map(|r| (bench_name.clone(), r))
+                                })
+                                .collect();
+                            (model_name.clone(), bench_results)
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // No post-execute aggregate when running from JSON; pass empty post_execute_results
+    let post_execute_results: HashMap<String, BenchmarkResult> = HashMap::new();
+
+    // Generate comparison reports using the in-memory results
     for (idx, comparison) in config.comparisons.iter().enumerate() {
         if comparison.models.is_empty() {
             continue;
@@ -505,7 +673,13 @@ fn generate_comparison_reports(
             format!("{}.html", slug)
         };
 
-        report::generate_comparison_report(&results, output_path, &filename, comparison)?;
+        report::generate_comparison_report(
+            &all_models_results,
+            output_path,
+            &filename,
+            comparison,
+            &post_execute_results,
+        )?;
     }
 
     Ok(())

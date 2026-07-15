@@ -1,7 +1,7 @@
 use crate::benchmarks::mmlu_pro::MmluProBenchmark;
 use crate::client::{Client, LogprobEntry};
 use crate::config::Model;
-use crate::reports::model::{BenchmarkResult, TestAggregate};
+use crate::reports::model::{BenchmarkResult, BreakdownTable, Score, ScoreUnit, TestAggregate};
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -81,8 +81,9 @@ impl super::Benchmark for KldBenchmark {
         crate::reports::model::BenchmarkCategory::Similarity
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
-        use crate::reports::model::{Score, ScoreUnit};
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
+        use crate::reports::model::{Diagnostic, Score, ScoreUnit};
 
         // Per-model raw result structure (from execute):
         // { model, num_prompts, kld: [...], output_tokens, thinking_tokens }
@@ -115,7 +116,6 @@ impl super::Benchmark for KldBenchmark {
         }
 
         // Add diagnostic noting that cross-model KLD is in the aggregate
-        use crate::reports::model::Diagnostic;
         let diagnostics = vec![Diagnostic {
             level: "info".to_string(),
             message: "KLD score (similarity to other models) is shown in the aggregate/pairwise \
@@ -133,7 +133,8 @@ impl super::Benchmark for KldBenchmark {
         })
     }
 
-    fn to_report_aggregate(&self, raw: &serde_json::Value) -> Result<Option<TestAggregate>> {
+    fn to_report_aggregate(&self, b: &BenchmarkResult) -> Result<Option<TestAggregate>> {
+        let raw = &b.raw;
         use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
 
         // Extract pairwise KLD scores
@@ -178,7 +179,7 @@ impl super::Benchmark for KldBenchmark {
         Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
         let num_prompts: usize = config
             .get("num_prompts")
@@ -219,8 +220,8 @@ impl super::Benchmark for KldBenchmark {
         }
 
         let mut model_logprobs: Vec<Vec<LogprobEntry>> = Vec::new();
-        let mut total_output_tokens: u64 = 0;
-        let mut total_thinking_tokens: u64 = 0;
+        let mut total_output_tokens: i64 = 0;
+        let mut total_thinking_tokens: i64 = 0;
         let mut failed = 0;
 
         for prompt in &prompts {
@@ -230,8 +231,8 @@ impl super::Benchmark for KldBenchmark {
                 prompt,
             ) {
                 Ok((logprobs, output_tokens, thinking_tokens)) => {
-                    total_output_tokens += output_tokens.unwrap_or(0);
-                    total_thinking_tokens += thinking_tokens.unwrap_or(0);
+                    total_output_tokens += output_tokens.unwrap_or(0) as i64;
+                    total_thinking_tokens += thinking_tokens.unwrap_or(0) as i64;
                     model_logprobs.push(logprobs);
                 }
                 Err(e) => {
@@ -251,24 +252,43 @@ impl super::Benchmark for KldBenchmark {
             );
         }
 
-        Ok(serde_json::json!({
+        // Build raw JSON
+        let raw_json = serde_json::json!({
             "model": model.display_name,
             "num_prompts": prompts.len(),
             "kld": model_logprobs,
             "output_tokens": total_output_tokens,
             "thinking_tokens": total_thinking_tokens,
-        }))
+        });
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![crate::reports::model::Diagnostic {
+                level: "info".to_string(),
+                message: format!(
+                    "KLD: {} prompts evaluated, {}/{} failures ({:.0}%%)",
+                    prompts.len(),
+                    failed,
+                    prompts.len(),
+                    (failed as f64 / prompts.len() as f64) * 100.0
+                ),
+            }],
+            raw: raw_json,
+        })
     }
 
     fn post_execute(
         &self,
-        model_results: &HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value> {
+        model_results: &HashMap<String, BenchmarkResult>,
+    ) -> Result<BenchmarkResult> {
         let mut all_logits: HashMap<String, Vec<Vec<LogprobEntry>>> = HashMap::new();
         let mut missing_models = Vec::new();
 
-        for (name, data) in model_results {
-            if let Some(kld_arr) = data.get("kld").and_then(|v| v.as_array()) {
+        for (name, result) in model_results {
+            if let Some(kld_arr) = result.raw.get("kld").and_then(|v| v.as_array()) {
                 let mut entries: Vec<Vec<LogprobEntry>> = Vec::new();
                 for arr in kld_arr {
                     if let Some(inner) = arr.as_array() {
@@ -367,6 +387,41 @@ impl super::Benchmark for KldBenchmark {
             "avg_kld_to_others".to_string(),
             serde_json::Value::Object(avg_kld_to_others),
         );
-        Ok(serde_json::json!(pairwise))
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::from([(
+                "pairwise_kld".to_string(),
+                BreakdownTable {
+                    title: "Pairwise KLD".to_string(),
+                    rows: pairwise
+                        .iter()
+                        .filter(|(k, _)| *k != "avg_kld_to_others")
+                        .filter_map(|(key, data)| {
+                            data.as_object().map(|obj| {
+                                let avg_kld =
+                                    obj.get("avg_kld").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let num_prompts = obj
+                                    .get("num_prompts_evaluated")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                let row_scores = BTreeMap::from([
+                                    ("avg_kld".to_string(), Score::float(avg_kld, ScoreUnit::Kld)),
+                                    (
+                                        "num_prompts_evaluated".to_string(),
+                                        Score::integer(num_prompts, ScoreUnit::Count),
+                                    ),
+                                ]);
+                                (key.clone(), row_scores)
+                            })
+                        })
+                        .collect(),
+                },
+            )]),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: serde_json::json!(pairwise),
+        })
     }
 }

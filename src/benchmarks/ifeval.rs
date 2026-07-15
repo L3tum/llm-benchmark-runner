@@ -212,21 +212,21 @@ impl Benchmark for IFEvalBenchmark {
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<serde_json::Value> {
+    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
         let dataset = load_ifeval_dataset()?;
         let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
 
-        let mut total_instructions = 0;
-        let mut total_followed = 0;
+        let mut total_instructions = 0i64;
+        let mut total_followed = 0i64;
         let mut instance_results = Vec::new();
-        let mut total_output_tokens = 0u64;
-        let mut total_thinking_tokens = 0u64;
-        let mut skipped_instances = 0;
+        let mut total_output_tokens = 0i64;
+        let mut total_thinking_tokens = 0i64;
+        let mut skipped_instances = 0i64;
 
         for row in &dataset {
             let verifiers = create_verifiers(&row.instruction_ids);
             if verifiers.is_empty() {
-                skipped_instances += row.instruction_ids.len();
+                skipped_instances += row.instruction_ids.len() as i64;
                 continue;
             }
 
@@ -234,8 +234,8 @@ impl Benchmark for IFEvalBenchmark {
             let (response, output_tokens, thinking_tokens) =
                 client.chat_completion(&model.model_name, "", &prompt)?;
 
-            total_output_tokens += output_tokens.unwrap_or(0);
-            total_thinking_tokens += thinking_tokens.unwrap_or(0);
+            total_output_tokens += output_tokens.unwrap_or(0) as i64;
+            total_thinking_tokens += thinking_tokens.unwrap_or(0) as i64;
 
             let mut instance_followed = 0;
             let mut instruction_results = Vec::new();
@@ -269,7 +269,8 @@ impl Benchmark for IFEvalBenchmark {
             total_followed as f64 / total_instructions as f64
         };
 
-        Ok(serde_json::json!({
+        // Build raw JSON
+        let raw_json = serde_json::json!({
             "instruction_following_rate": follow_rate,
             "total_instructions": total_instructions,
             "total_followed": total_followed,
@@ -277,10 +278,26 @@ impl Benchmark for IFEvalBenchmark {
             "output_tokens": total_output_tokens,
             "thinking_tokens": total_thinking_tokens,
             "instance_results": instance_results,
-        }))
+        });
+
+        Ok(BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![crate::reports::model::Diagnostic {
+                level: "info".to_string(),
+                message: format!(
+                    "IFEval: {}/{} instructions followed ({:.1}%). {} instructions were skipped (no verifier implemented).",
+                    total_followed, total_instructions, follow_rate * 100.0, skipped_instances
+                ),
+            }],
+            raw: raw_json,
+        })
     }
 
-    fn to_report_result(&self, raw: &serde_json::Value) -> Result<BenchmarkResult> {
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
         let follow_rate = raw
             .get("instruction_following_rate")
             .and_then(|v| v.as_f64())

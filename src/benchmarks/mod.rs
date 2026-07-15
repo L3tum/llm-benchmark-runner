@@ -33,22 +33,30 @@ pub trait Benchmark: Send + Sync {
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         Ok(())
     }
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<serde_json::Value>;
-    /// Convert the raw JSON result into a normalized `BenchmarkResult`.
-    /// Default implementation returns `Ok(BenchmarkResult::empty())` — benchmarks should override.
-    fn to_report_result(&self, _raw: &serde_json::Value) -> Result<BenchmarkResult> {
-        Ok(BenchmarkResult::empty())
+    /// Execute the benchmark for a single model, returning a normalized result with scores.
+    /// The `raw` field of the returned `BenchmarkResult` should contain the serialized
+    /// JSON that would have been returned previously, for backwards compatibility and debug.
+    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult>;
+
+    /// Convert an in-memory `BenchmarkResult` (from a previous run or resume) into a
+    /// `BenchmarkResult` for reports. Should typically just return `Ok(b.clone())`.
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        Ok(b.clone())
     }
-    /// Convert the raw post-execute JSON into an optional aggregate.
-    /// Default returns `Ok(None)` — benchmarks like KLD should override.
-    fn to_report_aggregate(&self, _raw: &serde_json::Value) -> Result<Option<TestAggregate>> {
+
+    /// For benchmarks that produce aggregates (e.g., KLD pairwise) from all model results,
+    /// convert the result of `post_execute` into a `TestAggregate`. Default: None.
+    fn to_report_aggregate(&self, _result: &BenchmarkResult) -> Result<Option<TestAggregate>> {
         Ok(None)
     }
+
+    /// Post-execute processing that combines all models' results for this benchmark.
+    /// Returns a `BenchmarkResult` containing aggregate metrics (e.g., KLD pairwise).
     fn post_execute(
         &self,
-        _model_results: &HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value> {
-        Ok(serde_json::Value::Null)
+        _model_results: &HashMap<String, BenchmarkResult>,
+    ) -> Result<BenchmarkResult> {
+        Ok(BenchmarkResult::empty())
     }
 }
 
@@ -143,7 +151,7 @@ pub fn execute_benchmark(
     name: &str,
     model: &Model,
     config: &yaml_serde::Value,
-) -> Result<serde_json::Value> {
+) -> Result<BenchmarkResult> {
     registry()
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("Unknown benchmark: {name}"))?
@@ -152,8 +160,8 @@ pub fn execute_benchmark(
 
 pub fn post_execute_benchmark(
     name: &str,
-    model_results: &HashMap<String, serde_json::Value>,
-) -> Result<serde_json::Value> {
+    model_results: &HashMap<String, BenchmarkResult>,
+) -> Result<BenchmarkResult> {
     registry()
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("Unknown benchmark: {name}"))?
