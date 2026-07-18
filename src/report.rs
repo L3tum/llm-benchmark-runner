@@ -49,7 +49,8 @@ fn slugify_name(name: String) -> String {
 }
 
 /// Build a `ReportInput` from in-memory `BenchmarkResult` objects.
-fn build_report_input(
+/// Only used by the mock report command.
+pub(crate) fn build_report_input(
     all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
     post_execute_results: &HashMap<String, BenchmarkResult>,
 ) -> ReportInput {

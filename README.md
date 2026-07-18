@@ -28,6 +28,20 @@ Supports **MMLU-Pro**, **GPQA Diamond**, **AIME 2025/2026**, **MATH-500**, **Cod
 cargo install --path .
 ```
 
+### Official Minebench Renderer (Optional)
+
+For full-fidelity Minecraft-like voxel rendering using the official [Ammaar-Alam/minebench](https://github.com/Ammaar-Alam/minebench) renderer:
+
+1. Install **Node.js 18+** and npm (https://nodejs.org/)
+2. Build with the `renderer-official` feature:
+   ```bash
+   cargo build --release --features renderer-official
+   ```
+   This downloads the official TypeScript source, compiles it with esbuild, and embeds the renderer alongside the pre-built Three.js.
+3. The generated report will use the official renderer with texture atlas instead of the default color-palette renderer.
+
+The default build (`cargo build`) uses a lightweight custom renderer with no extra dependencies.
+
 ## Configuration
 
 Edit `models_config.yaml`. Each model is:

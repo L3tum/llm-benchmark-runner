@@ -28,6 +28,17 @@ slug = "0.1"
 ctrlc = "3.4"
 # No reports subcrate - it's a module under src/reports/
 
+[build-dependencies]
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
+
+[features]
+renderer-official = [] # requires Node.js on build machine; see README
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
 [dev-dependencies]
 mockall = "0.11"  # for mocking HTTP client in tests
 tempfile = "3.19"  # for temporary files in tests

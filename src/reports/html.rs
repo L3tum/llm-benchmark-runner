@@ -6,11 +6,7 @@ use askama::Template;
 use serde::Serialize;
 use std::collections::HashMap;
 
-/// Custom filter for slugifying names
-fn slugify(name: &str) -> String {
-    slugify_name(name.to_string())
-}
-
+mod filters;
 pub struct HtmlReportGenerator;
 
 impl ReportGenerator for HtmlReportGenerator {
@@ -50,6 +46,9 @@ impl ReportGenerator for HtmlReportGenerator {
             })
             .collect();
 
+        #[cfg(feature = "renderer-official")]
+        let atlas_data_uri = include_str!("../reports/templates/atlas_data_uri.txt");
+
         let template = ReportTemplate {
             generated_at,
             models,
@@ -57,6 +56,8 @@ impl ReportGenerator for HtmlReportGenerator {
             token_usage_results: &token_usage_results,
             summary: &input.summary,
             category_data,
+            #[cfg(feature = "renderer-official")]
+            atlas_data_uri,
         };
         Ok(template.render()?)
     }
@@ -862,36 +863,6 @@ fn to_math500_result(br: &BenchmarkResult) -> Math500Result {
 }
 
 fn to_minebench_result(model: String, br: &BenchmarkResult) -> MinebenchResult {
-    let json_valid = br
-        .scores
-        .get("valid_json")
-        .map(|s| match &s.value {
-            ScoreValue::Bool(b) => *b,
-            _ => false,
-        })
-        .unwrap_or(false);
-    let valid_buildings = br
-        .scores
-        .get("valid_buildings")
-        .map(|s| match &s.value {
-            ScoreValue::Integer(i) => *i,
-            _ => 0,
-        })
-        .unwrap_or(0);
-    let total_buildings = br
-        .scores
-        .get("total_buildings")
-        .map(|s| match &s.value {
-            ScoreValue::Integer(i) => *i,
-            _ => 0,
-        })
-        .unwrap_or(0);
-    let output_file = br
-        .artifacts
-        .iter()
-        .find(|a| a.label == "Output")
-        .map(|a| a.path.clone())
-        .unwrap_or_default();
     let output_tokens = br
         .scores
         .get("output_tokens")
@@ -902,17 +873,51 @@ fn to_minebench_result(model: String, br: &BenchmarkResult) -> MinebenchResult {
         .get("thinking_tokens")
         .map(|s| s.display_value())
         .unwrap_or_else(|| "–".into());
+    let output_file = br
+        .artifacts
+        .iter()
+        .find(|a| a.label == "Output")
+        .map(|a| a.path.clone())
+        .unwrap_or_default();
+
+    // Read and parse multi-building output
+    let buildings = if !output_file.is_empty() && std::path::Path::new(&output_file).exists() {
+        let raw = std::fs::read_to_string(&output_file).unwrap_or_default();
+        if let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) {
+            // Expected structure: models -> model_name -> buildings -> building_name -> {version, blocks}
+            root.get("models")
+                .and_then(|m| m.as_object())
+                .unwrap_or(&serde_json::Map::new())
+                .values()
+                .filter_map(|model_data| model_data["buildings"].as_object())
+                .flat_map(|buildings| {
+                    buildings.iter().map(|(name, building_data)| Building {
+                        name: name.clone(),
+                        valid_json: building_data["version"].is_string()
+                            && building_data["blocks"].is_array(),
+                        json_content: building_data.to_string(),
+                    })
+                })
+                .collect()
+        } else {
+            // Invalid JSON — one building with nothing
+            vec![Building {
+                name: "invalid".to_string(),
+                valid_json: false,
+                json_content: String::new(),
+            }]
+        }
+    } else {
+        vec![Building {
+            name: "missing".to_string(),
+            valid_json: false,
+            json_content: String::new(),
+        }]
+    };
+
     MinebenchResult {
         model,
-        json_valid,
-        json_valid_str: if json_valid {
-            "✓".into()
-        } else {
-            "✗".into()
-        },
-        valid_buildings,
-        total_buildings,
-        output_file,
+        buildings,
         output_tokens,
         thinking_tokens,
     }
@@ -1202,15 +1207,19 @@ struct KldAvgResult {
     best: bool,
 }
 
+/// Single building within a minebench result
+#[derive(Serialize, Clone)]
+struct Building {
+    name: String,
+    valid_json: bool,
+    json_content: String,
+}
+
 /// Strongly-typed Minebench result
 #[derive(Serialize, Clone)]
 struct MinebenchResult {
     model: String,
-    json_valid: bool,
-    json_valid_str: String,
-    valid_buildings: i64,
-    total_buildings: i64,
-    output_file: String,
+    buildings: Vec<Building>,
     output_tokens: String,
     thinking_tokens: String,
 }
@@ -1298,6 +1307,7 @@ struct TokenUsageResult {
 }
 
 /// Report template with category data.
+#[cfg(not(feature = "renderer-official"))]
 #[derive(Template)]
 #[template(path = "report.html")]
 struct ReportTemplate<'a> {
@@ -1307,6 +1317,20 @@ struct ReportTemplate<'a> {
     token_usage_results: &'a HashMap<String, HashMap<String, MinebenchResult>>,
     summary: &'a [String],
     category_data: Vec<CategoryData>,
+}
+
+/// Official renderer version of the template
+#[cfg(feature = "renderer-official")]
+#[derive(Template)]
+#[template(path = "report-official.html")]
+struct ReportTemplate<'a> {
+    generated_at: &'a str,
+    models: &'a str,
+    models_list: &'a [String],
+    token_usage_results: &'a HashMap<String, HashMap<String, MinebenchResult>>,
+    summary: &'a [String],
+    category_data: Vec<CategoryData>,
+    atlas_data_uri: &'a str,
 }
 
 impl HtmlReport for HtmlReportGenerator {}

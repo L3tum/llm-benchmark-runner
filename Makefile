@@ -54,3 +54,11 @@ run-no-resume:
 # Generate report from existing results
 report:
 	cargo run report
+
+# Generate mock report with synthetic minebench data (tests the voxel viewer)
+mock-report:
+	cargo run mock-report
+
+# Generate mock report with the official minebench renderer (requires Node.js)
+mock-report-official:
+	cargo run --features renderer-official mock-report

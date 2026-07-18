@@ -405,7 +405,7 @@
                 <div class="section">
                     <h3>Minebench Voxel Builds</h3>
                     <p style="color: #666; font-size: 0.85em; margin-top: -8px;">
-                        Custom color-palette renderer (no external textures)
+                        Official minebench renderer with texture atlas (requires Node.js build-time compilation)
                     </p>
 
                     <!-- Tab navigation -->
@@ -477,166 +477,29 @@
                     <!-- Three.js Voxel Viewer Module (fully self-contained, no CDN) -->
                     <script>{% include "voxel-viewer-three.js" %}</script>
                     <script>{% include "voxel-viewer-orbitcontrols.js" %}</script>
+                    <script>{% include "official-renderer.js" %}</script>
                     <script>
-
-                        // Block type to color mapping (linearized sRGB)
-                        const BLOCK_COLORS = {
-                            'stone': 0.5,
-                            'cobblestone': 0.45,
-                            'oak_planks': 0.75,
-                            'bricks': 0.55,
-                            'stone_bricks': 0.55,
-                            'grass_block': 0.6,
-                            'dirt': 0.5,
-                            'sand': 0.8,
-                            'oak_log': 0.4,
-                            'oak_leaves': 0.4,
-                            'water': 0.2,
-                            'white_wool': 0.9,
-                            'black_wool': 0.1,
-                            'red_wool': 0.5,
-                            'blue_wool': 0.3,
-                            'green_wool': 0.4,
-                            'yellow_wool': 0.7,
-                            'orange_wool': 0.6,
-                            'purple_wool': 0.5,
-                            'brown_wool': 0.35,
-                            'gray_wool': 0.5,
-                            'glass': 0.6,
-                            'glowstone': 0.9,
-                            'iron_block': 0.6,
-                            'gold_block': 0.7,
-                        };
-
-                        const BLOCK_RENDER_KINDS = {
-                            'water': 'transparent',
-                            'glass': 'transparent',
-                            'oak_leaves': 'cutout',
-                            'glowstone': 'emissive',
-                        };
-
-                        function getRenderKind(blockType) {
-                            return BLOCK_RENDER_KINDS[blockType] || 'opaque';
-                        }
-
-                        function srgbByteToLinear(byte) {
-                            const s = Math.min(1, Math.max(0, byte / 255));
-                            return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-                        }
-
-                        function hexToLinearRgb(hex) {
-                            return [
-                                srgbByteToLinear((hex >> 16) & 0xff),
-                                srgbByteToLinear((hex >> 8) & 0xff),
-                                srgbByteToLinear(hex & 0xff),
-                            ];
-                        }
-
-                        const TINT_LEAVES = hexToLinearRgb(0x48b518);
-                        const TINT_GRASS = hexToLinearRgb(0x7fb238);
-                        const TINT_WATER = hexToLinearRgb(0x3f76e4);
-                        const TINT_WHITE = [1, 1, 1];
-
-                        function faceTint(blockType, face) {
-                            if (blockType === 'oak_leaves') return TINT_LEAVES;
-                            if (blockType === 'water') return TINT_WATER;
-                            if (blockType === 'grass_block' && face === 'up') return TINT_GRASS;
-                            return TINT_WHITE;
-                        }
-
-                        const DIRS = [
-                            { face: 'east', dx: 1, dy: 0, dz: 0, nx: 1, ny: 0, nz: 0 },
-                            { face: 'west', dx: -1, dy: 0, dz: 0, nx: -1, ny: 0, nz: 0 },
-                            { face: 'north', dx: 0, dy: 0, dz: -1, nx: 0, ny: 0, nz: -1 },
-                            { face: 'south', dx: 0, dy: 0, dz: 1, nx: 0, ny: 0, nz: 1 },
-                            { face: 'up', dx: 0, dy: 1, dz: 0, nx: 0, ny: 1, nz: 0 },
-                            { face: 'down', dx: 0, dy: -1, dz: 0, nx: 0, ny: -1, nz: 0 },
+                        // Save the official renderer's createVoxelGroup and async version
+                        var _officialCreateVoxelGroup = typeof createVoxelViewer === "object" && createVoxelViewer.createVoxelGroup ? createVoxelViewer.createVoxelGroup : null;
+                        var _officialCreateVoxelGroupAsync = typeof createVoxelViewer === "object" && createVoxelViewer.createVoxelGroupAsync ? createVoxelViewer.createVoxelGroupAsync : null;
+                        console.log("_officialCreateVoxelGroup:", _officialCreateVoxelGroup);
+                        console.log("_officialCreateVoxelGroupAsync:", _officialCreateVoxelGroupAsync);
+                    </script>
+                    <script>
+                        // Official minebench renderer with embedded texture atlas
+                        const ATLAS_DATA_URI = "{{ atlas_data_uri }}";
+                        const BLOCK_TYPES = [
+                            { id: 'stone' }, { id: 'cobblestone' }, { id: 'oak_planks' },
+                            { id: 'bricks' }, { id: 'stone_bricks' }, { id: 'grass_block' },
+                            { id: 'dirt' }, { id: 'sand' }, { id: 'oak_log' }, { id: 'oak_leaves' },
+                            { id: 'water' }, { id: 'white_wool' }, { id: 'black_wool' },
+                            { id: 'red_wool' }, { id: 'blue_wool' }, { id: 'green_wool' },
+                            { id: 'yellow_wool' }, { id: 'orange_wool' }, { id: 'purple_wool' },
+                            { id: 'brown_wool' }, { id: 'gray_wool' }, { id: 'glass' },
+                            { id: 'glowstone' }, { id: 'iron_block' }, { id: 'gold_block' }
                         ];
 
-                        function getQuad(x, y, z, face) {
-                            switch (face) {
-                                case 'east': return [[x+1, y, z], [x+1, y+1, z], [x+1, y+1, z+1], [x+1, y, z+1]];
-                                case 'west': return [[x, y, z+1], [x, y+1, z+1], [x, y+1, z], [x, y, z]];
-                                case 'north': return [[x, y, z], [x, y+1, z], [x+1, y+1, z], [x+1, y, z]];
-                                case 'south': return [[x+1, y, z+1], [x+1, y+1, z+1], [x, y+1, z+1], [x, y, z+1]];
-                                case 'up': return [[x, y+1, z+1], [x+1, y+1, z+1], [x+1, y+1, z], [x, y+1, z]];
-                                case 'down': return [[x, y, z], [x+1, y, z], [x+1, y, z+1], [x, y, z+1]];
-                            }
-                        }
-
-                        function isVoxelOccluder(type) {
-                            return type !== 'water' && type !== 'oak_leaves';
-                        }
-
-                        function canVoxelBlockEmitAnyFace(block, blocksByPos) {
-                            for (const d of DIRS) {
-                                const pos = (block.x + d.dx) | ((block.y + d.dy) << 10) | ((block.z + d.dz) << 20);
-                                const neighborType = blocksByPos.get(pos);
-                                if (!neighborType || (neighborType !== block.type && !isVoxelOccluder(neighborType))) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-
-                        function encodePosition(x, y, z) {
-                            return x | (y << 10) | (z << 20);
-                        }
-
-                        class VoxelMeshBuilder {
-                            constructor() {
-                                this.opaquePositions = [];
-                                this.opaqueNormals = [];
-                                this.opaqueColors = [];
-                                this.opaqueIndices = [];
-                                this.transparentPositions = [];
-                                this.transparentNormals = [];
-                                this.transparentColors = [];
-                                this.transparentIndices = [];
-                            }
-
-                            addQuad(positions, normal, color) {
-                                const bucket = (normal[1] === 0 && normal[2] === 0) ? 'opaque' : 'transparent';
-                                const bucketPos = bucket === 'opaque' ? this.opaquePositions : this.transparentPositions;
-                                const bucketNorm = bucket === 'opaque' ? this.opaqueNormals : this.transparentNormals;
-                                const bucketCol = bucket === 'opaque' ? this.opaqueColors : this.transparentColors;
-                                const bucketIdx = bucket === 'opaque' ? this.opaqueIndices : this.transparentIndices;
-                                const baseIdx = bucketPos.length / 3;
-                                for (const [vx, vy, vz] of positions) {
-                                    bucketPos.push(vx, vy, vz);
-                                    bucketNorm.push(normal[0], normal[1], normal[2]);
-                                    bucketCol.push(color[0], color[1], color[2]);
-                                }
-                                bucketIdx.push(baseIdx, baseIdx+1, baseIdx+2, baseIdx, baseIdx+2, baseIdx+3);
-                            }
-
-                            createGeometry() {
-                                const geometries = [];
-                                if (this.opaqueIndices.length > 0) {
-                                    const geo = new THREE.BufferGeometry();
-                                    geo.setAttribute('position', new THREE.Float32BufferAttribute(this.opaquePositions, 3));
-                                    geo.setAttribute('normal', new THREE.Float32BufferAttribute(this.opaqueNormals, 3));
-                                    geo.setAttribute('color', new THREE.Float32BufferAttribute(this.opaqueColors, 3));
-                                    geo.setIndex(this.opaqueIndices);
-                                    geometries.push(geo);
-                                }
-                                if (this.transparentIndices.length > 0) {
-                                    const geo = new THREE.BufferGeometry();
-                                    geo.setAttribute('position', new THREE.Float32BufferAttribute(this.transparentPositions, 3));
-                                    geo.setAttribute('normal', new THREE.Float32BufferAttribute(this.transparentNormals, 3));
-                                    geo.setAttribute('color', new THREE.Float32BufferAttribute(this.transparentColors, 3));
-                                    geo.setIndex(this.transparentIndices);
-                                    geometries.push(geo);
-                                }
-                                return geometries;
-                            }
-                        }
-
-                        function createVoxelViewer(containerId, voxelBuild, options = {}) {
-                            const container = document.getElementById(containerId);
-                            if (!container) throw new Error(`Container #${containerId} not found`);
-                            const { autoRotate = true, onBuildReady = () => {} } = options;
-
+                        function setupViewer(container, group, autoRotate, onBuildReady) {
                             const scene = new THREE.Scene();
                             const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1000);
                             camera.position.set(10, 10, 10);
@@ -656,124 +519,22 @@
                             const hemiLight = new THREE.HemisphereLight(0xffffff, 0x555555, 0.3);
                             scene.add(hemiLight);
 
+                            scene.add(group);
+
                             const controls = new THREE.OrbitControls(camera, renderer.domElement);
                             controls.enableDamping = true;
                             controls.dampingFactor = 0.1;
                             controls.autoRotate = autoRotate;
                             controls.autoRotateSpeed = 2;
 
-                            const gridHelper = new THREE.GridHelper(50, 50, 0xccd5e1, 0xe2e8f0);
-                            scene.add(gridHelper);
-
-                            if (voxelBuild && voxelBuild.blocks) {
-                                const blocksByPos = new Map();
-                                const nonWaterBlocks = [];
-                                const waterBlocks = [];
-                                for (const b of voxelBuild.blocks) {
-                                    blocksByPos.set(encodePosition(b.x, b.y, b.z), b.type);
-                                }
-                                for (const b of voxelBuild.blocks) {
-                                    if (b.type === 'water') {
-                                        if (canVoxelBlockEmitAnyFace(b, blocksByPos)) waterBlocks.push(b);
-                                    } else if (canVoxelBlockEmitAnyFace(b, blocksByPos)) {
-                                        nonWaterBlocks.push(b);
-                                    }
-                                }
-                                const builder = new VoxelMeshBuilder();
-                                let minX = Infinity, minY = Infinity, minZ = Infinity;
-                                let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-                                for (const b of [...nonWaterBlocks, ...waterBlocks]) {
-                                    minX = Math.min(minX, b.x); minY = Math.min(minY, b.y); minZ = Math.min(minZ, b.z);
-                                    maxX = Math.max(maxX, b.x); maxY = Math.max(maxY, b.y); maxZ = Math.max(maxZ, b.z);
-                                }
-                                const cx = (minX + maxX + 1) / 2; const cy = minY; const cz = (minZ + maxZ + 1) / 2;
-
-                                for (const block of nonWaterBlocks) {
-                                    const kind = getRenderKind(block.type);
-                                    if (kind === 'transparent') continue;
-                                    for (const d of DIRS) {
-                                        const neighborType = blocksByPos.get(encodePosition(block.x + d.dx, block.y + d.dy, block.z + d.dz));
-                                        if (neighborType) { if (neighborType === block.type) continue; if (isVoxelOccluder(neighborType)) continue; }
-                                        const tint = faceTint(block.type, d.face);
-                                        const baseColor = BLOCK_COLORS[block.type] ?? 0.5;
-                                        const color = tint.map(c => Math.min(1, baseColor + (c - 0.5)));
-                                        const quad = getQuad(block.x - cx, block.y - cy, block.z - cz, d.face);
-                                        builder.addQuad(quad, [d.nx, d.ny, d.nz], color);
-                                    }
-                                }
-
-                                const waterPlanes = new Map();
-                                for (const block of waterBlocks) {
-                                    for (const d of DIRS) {
-                                        const neighborType = blocksByPos.get(encodePosition(block.x + d.dx, block.y + d.dy, block.z + d.dz));
-                                        if (neighborType) { if (neighborType === 'water') continue; if (isVoxelOccluder(neighborType)) continue; }
-                                        const key = `${d.face}:${block.x + d.dx}:${block.y + d.dy}:${block.z + d.dz}`;
-                                        if (!waterPlanes.has(key)) waterPlanes.set(key, { face: d.face, plane: block.x + d.dx, cells: new Set() });
-                                        const plane = waterPlanes.get(key);
-                                        const cell = (block.x) | (block.y << 10) | (block.z << 20);
-                                        plane.cells.add(cell);
-                                    }
-                                }
-
-                                for (const [key, plane] of waterPlanes) {
-                                    if (plane.cells.size === 0) continue;
-                                    let minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity;
-                                    for (const cell of plane.cells) {
-                                        const u = cell & 0x3ff; const v = (cell >> 10) & 0x3ff;
-                                        minU = Math.min(minU, u); minV = Math.min(minV, v);
-                                        maxU = Math.max(maxU, u); maxV = Math.max(maxV, v);
-                                    }
-                                    if (maxU - minU + 1 > 1 || maxV - minV + 1 > 1) {
-                                        const x0 = minU - cx; const x1 = maxU - cx;
-                                        const y0 = minV - cy; const y1 = maxV - cy;
-                                        let quad, normal;
-                                        switch (plane.face) {
-                                            case 'east':
-                                                quad = [[plane.plane - cx, x0, y0], [plane.plane - cx, x1, y0], [plane.plane - cx, x1, y1], [plane.plane - cx, x0, y1]];
-                                                normal = [1, 0, 0]; break;
-                                            case 'west':
-                                                quad = [[plane.plane - cx, x0, y1], [plane.plane - cx, x1, y1], [plane.plane - cx, x1, y0], [plane.plane - cx, x0, y0]];
-                                                normal = [-1, 0, 0]; break;
-                                            case 'up':
-                                                quad = [[x0, plane.plane - cy, y1], [x1, plane.plane - cy, y1], [x1, plane.plane - cy, y0], [x0, plane.plane - cy, y0]];
-                                                normal = [0, 1, 0]; break;
-                                            default: continue;
-                                        }
-                                        builder.addQuad(quad, normal, TINT_WATER);
-                                    }
-                                }
-
-                                const geometries = builder.createGeometry();
-                                for (const geo of geometries) {
-                                    const isTransparent = builder.transparentPositions.length > 0;
-                                    const material = new THREE.MeshStandardMaterial({
-                                        vertexColors: true,
-                                        transparent: isTransparent,
-                                        opacity: isTransparent ? 0.7 : 1.0,
-                                        roughness: 0.8,
-                                        metalness: 0.1,
-                                    });
-                                    const mesh = new THREE.Mesh(geo, material);
-                                    mesh.castShadow = true;
-                                    mesh.receiveShadow = true;
-                                    scene.add(mesh);
-                                }
-
-                                const allBlocks = [...nonWaterBlocks, ...waterBlocks];
-                                const bMinX = Math.min(...allBlocks.map(b => b.x));
-                                const bMinY = Math.min(...allBlocks.map(b => b.y));
-                                const bMinZ = Math.min(...allBlocks.map(b => b.z));
-                                const bMaxX = Math.max(...allBlocks.map(b => b.x));
-                                const bMaxY = Math.max(...allBlocks.map(b => b.y));
-                                const bMaxZ = Math.max(...allBlocks.map(b => b.z));
-                                const size = new THREE.Vector3(bMaxX - bMinX + 1, bMaxY - bMinY + 1, bMaxZ - bMinZ + 1);
-                                const maxDim = Math.max(size.x, size.y, size.z) * 1.5;
-                                camera.position.set(0, maxDim * 0.5, maxDim);
-                                camera.lookAt(0, size.y * 0.3, 0);
-                                controls.target.set(0, size.y * 0.3, 0);
-                                controls.update();
-                                gridHelper.position.y = bMinY - cy;
-                            }
+                            // Position camera based on bounds
+                            const box = new THREE.Box3().setFromObject(group);
+                            const size = box.getSize(new THREE.Vector3());
+                            const maxDim = Math.max(size.x, size.y, size.z) * 1.5;
+                            camera.position.set(0, maxDim * 0.5, maxDim);
+                            camera.lookAt(0, size.y * 0.3, 0);
+                            controls.target.set(0, size.y * 0.3, 0);
+                            controls.update();
 
                             const onResize = () => {
                                 camera.aspect = container.clientWidth / container.clientHeight;
@@ -788,9 +549,120 @@
                                 renderer.render(scene, camera);
                             }
                             animate();
-
                             onBuildReady(true);
-                            return { scene, camera, controls };
+                        }
+
+                        // Track active viewer per container to cancel stale renders
+                        const _activeViewers = {};
+
+                        // Wrapper that calls the official renderer with texture atlas
+                        // Uses async Web Worker version when available for non-blocking UI
+                        function createVoxelViewer(containerId, voxelBuild, options = {}) {
+                            if (!_officialCreateVoxelGroupAsync && !_officialCreateVoxelGroup) {
+                                console.error('Official renderer not loaded - createVoxelGroup unavailable');
+                                const container = document.getElementById(containerId);
+                                if (container) container.innerHTML = '<p style="color:red;text-align:center;margin-top:20%;">Renderer failed to load</p>';
+                                return;
+                            }
+                            const container = document.getElementById(containerId);
+                            if (!container) throw new Error(`Container #${containerId} not found`);
+                            const { autoRotate = true, onBuildReady = () => {} } = options;
+
+                            // Cancel any pending render for this container
+                            if (_activeViewers[containerId]) {
+                                _activeViewers[containerId].cancelled = true;
+                                // Abort any in-flight async request
+                                if (_activeViewers[containerId].abort) {
+                                    _activeViewers[containerId].abort();
+                                }
+                                container.innerHTML = '';
+                            }
+                            const renderCtx = { cancelled: false };
+                            _activeViewers[containerId] = renderCtx;
+
+                            // Show loading indicator
+                            container.innerHTML = '<p style="color:#666;text-align:center;margin-top:20%;">Loading 3D viewer...</p>';
+
+                            const atlasImg = new Image();
+                            atlasImg.onload = () => {
+                                if (renderCtx.cancelled) return;
+                                const atlasTexture = new THREE.CanvasTexture(atlasImg);
+                                atlasTexture.minFilter = THREE.NearestFilter;
+                                atlasTexture.magFilter = THREE.NearestFilter;
+                                atlasTexture.colorSpace = THREE.SRGBColorSpace;
+
+                                // Use async version if available (Web Worker)
+                                if (_officialCreateVoxelGroupAsync) {
+                                    const abortController = new AbortController();
+                                    renderCtx.abort = () => abortController.abort();
+                                    _officialCreateVoxelGroupAsync(voxelBuild, BLOCK_TYPES, atlasTexture, {
+                                        signal: abortController.signal,
+                                        blockLimit: 50000, // safety limit
+                                        cacheKey: containerId
+                                    }).then(result => {
+                                        if (renderCtx.cancelled) return;
+                                        container.innerHTML = '';
+                                        setupViewer(container, result.group, autoRotate, onBuildReady);
+                                    }).catch(err => {
+                                        if (renderCtx.cancelled || err.name === 'AbortError') return;
+                                        console.error('Failed to create voxel group async:', err);
+                                        // Fall back to sync version
+                                        try {
+                                            container.innerHTML = '';
+                                            const result = _officialCreateVoxelGroup(voxelBuild, BLOCK_TYPES, atlasTexture);
+                                            setupViewer(container, result.group, autoRotate, onBuildReady);
+                                        } catch (syncErr) {
+                                            console.error('Failed in sync fallback:', syncErr);
+                                            container.innerHTML = `<p style="color:red;text-align:center;margin-top:20%;">Error: ${syncErr.message}</p>`;
+                                        }
+                                    });
+                                } else {
+                                    // Sync fallback
+                                    try {
+                                        container.innerHTML = '';
+                                        const result = _officialCreateVoxelGroup(voxelBuild, BLOCK_TYPES, atlasTexture);
+                                        setupViewer(container, result.group, autoRotate, onBuildReady);
+                                    } catch (err) {
+                                        console.error('Failed to create voxel group:', err);
+                                        container.innerHTML = `<p style="color:red;text-align:center;margin-top:20%;">Error: ${err.message}</p>`;
+                                    }
+                                }
+                            };
+                            atlasImg.onerror = () => {
+                                if (renderCtx.cancelled) return;
+                                // Fallback to solid colors
+                                if (_officialCreateVoxelGroupAsync) {
+                                    const abortController = new AbortController();
+                                    renderCtx.abort = () => abortController.abort();
+                                    _officialCreateVoxelGroupAsync(voxelBuild, BLOCK_TYPES, null, {
+                                        signal: abortController.signal,
+                                        blockLimit: 50000,
+                                        cacheKey: containerId
+                                    }).then(result => {
+                                        if (renderCtx.cancelled) return;
+                                        container.innerHTML = '';
+                                        setupViewer(container, result.group, autoRotate, onBuildReady);
+                                    }).catch(err => {
+                                        if (renderCtx.cancelled || err.name === 'AbortError') return;
+                                        try {
+                                            container.innerHTML = '';
+                                            const result = _officialCreateVoxelGroup(voxelBuild, BLOCK_TYPES, null);
+                                            setupViewer(container, result.group, autoRotate, onBuildReady);
+                                        } catch (syncErr) {
+                                            container.innerHTML = `<p style="color:red;text-align:center;margin-top:20%;">Error: ${syncErr.message}</p>`;
+                                        }
+                                    });
+                                } else {
+                                    try {
+                                        container.innerHTML = '';
+                                        const result = _officialCreateVoxelGroup(voxelBuild, BLOCK_TYPES, null);
+                                        setupViewer(container, result.group, autoRotate, onBuildReady);
+                                    } catch (err) {
+                                        container.innerHTML = `<p style="color:red;text-align:center;margin-top:20%;">Error: ${err.message}</p>`;
+                                    }
+                                }
+                            };
+                            atlasImg.src = ATLAS_DATA_URI;
                         }
 
                         // Helper: slugify model name to match template-generated IDs
