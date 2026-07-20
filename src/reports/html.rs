@@ -448,6 +448,8 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
         BenchmarkCategory::Reasoning
         | BenchmarkCategory::Research
         | BenchmarkCategory::InstructionFollowing
+        | BenchmarkCategory::Hallucination
+        | BenchmarkCategory::Translation
         | BenchmarkCategory::Safety => CategoryData {
             name: cat.display().to_string(),
             name_slug: slugify_name(cat.display()),

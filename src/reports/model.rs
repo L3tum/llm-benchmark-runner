@@ -25,6 +25,8 @@ pub enum BenchmarkCategory {
     Research,
     Similarity,
     InstructionFollowing,
+    Hallucination,
+    Translation,
     Safety,
     Other(String),
 }
@@ -41,6 +43,8 @@ impl BenchmarkCategory {
             Self::Research => "Research".to_string(),
             Self::Similarity => "Similarity".to_string(),
             Self::InstructionFollowing => "Instruction-Following".to_string(),
+            Self::Hallucination => "Hallucination".to_string(),
+            Self::Translation => "Translation".to_string(),
             Self::Safety => "Safety".to_string(),
             Self::Other(s) => s.clone(),
         }
@@ -57,6 +61,8 @@ impl BenchmarkCategory {
             "Research" => Self::Research,
             "Similarity" => Self::Similarity,
             "Instruction-Following" => Self::InstructionFollowing,
+            "Hallucination" => Self::Hallucination,
+            "Translation" => Self::Translation,
             "Safety" => Self::Safety,
             other => Self::Other(other.to_string()),
         }

@@ -7,16 +7,32 @@ use std::sync::OnceLock;
 pub mod aime;
 pub mod answer_classifier;
 pub mod carwash;
+pub mod cnn_dailymail;
 pub mod coding_eval;
+pub mod ea_mt;
+pub mod faithdial;
+pub mod fever;
 pub mod gpqa;
+pub mod halueval;
 pub mod harmbench;
+pub mod hdm_bench;
 pub mod ifeval;
 pub mod kld;
 pub mod math500;
 pub mod minebench;
 pub mod mmlu_pro;
+pub mod mmlu_pro_plus;
+pub mod mmlu_prox;
+pub mod nq_open;
+pub mod race;
+pub mod squad_v2;
 pub mod supergpqa;
 pub mod swe_bench;
+pub mod tool_hallucination;
+pub mod triviaqa;
+pub mod true_false;
+pub mod truthful_qa;
+pub mod xsum;
 
 /// Trait for all benchmarks.
 pub trait Benchmark: Send + Sync {
@@ -131,6 +147,74 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "swebench_pro".to_string(),
             Box::new(swe_bench::SweBenchProBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "tool_hallucination".to_string(),
+            Box::new(tool_hallucination::ToolHallucinationBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "truthful_qa".to_string(),
+            Box::new(truthful_qa::TruthfulQABenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "truthful_qa_mc2".to_string(),
+            Box::new(truthful_qa::TruthfulQAMC2Benchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "fever".to_string(),
+            Box::new(fever::FeverBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "halueval".to_string(),
+            Box::new(halueval::HaluEvalBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "true_false".to_string(),
+            Box::new(true_false::TrueFalseBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "faithdial".to_string(),
+            Box::new(faithdial::FaithDialBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "hdm_bench".to_string(),
+            Box::new(hdm_bench::HdmBenchBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "nq_open".to_string(),
+            Box::new(nq_open::NQOpenBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "triviaqa".to_string(),
+            Box::new(triviaqa::TriviaQABenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "mmlu_pro_plus".to_string(),
+            Box::new(mmlu_pro_plus::MmluProPlusBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "mmlu_prox".to_string(),
+            Box::new(mmlu_prox::MmluProxBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "race".to_string(),
+            Box::new(race::RaceBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "squad_v2".to_string(),
+            Box::new(squad_v2::SquadV2Benchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "xsum".to_string(),
+            Box::new(xsum::XSumBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "cnn_dailymail".to_string(),
+            Box::new(cnn_dailymail::CnnDailyMailBenchmark) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "ea_mt".to_string(),
+            Box::new(ea_mt::EAMTBenchmark) as Box<dyn Benchmark>,
         );
         map
     })

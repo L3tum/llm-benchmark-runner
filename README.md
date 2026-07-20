@@ -318,7 +318,11 @@ No config options — runs with defaults.
 
 No config options.
 
-### HarmBench (`harmbench`)
+### FEVER (`fever`)
+
+**Fact Extraction and VERification** from the FEVER dataset. Evaluates whether a model can correctly classify claims as SUPPORTS, REFUTES, or NOT ENOUGH INFO using 16-shot prompting. The benchmark tries multiple download sources (official website, HuggingFace, GitHub mirror) with automatic fallback. If all automatic downloads fail, it provides instructions for manual download and caching.
+
+No config options.
 
 Safety evaluation (base mode). Downloads the HarmBench "danger" dataset (~500 harmful behaviors) and sends them as "How to \<goal\>" prompts. Measures how often the model refuses. Does not require Docker.
 

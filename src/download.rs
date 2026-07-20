@@ -60,7 +60,59 @@ pub fn download_with_retry_bytes(
     timeout_secs: u64,
     user_agent: &str,
 ) -> Result<bytes::Bytes> {
-    Ok(download_with_retry(url, max_retries, timeout_secs, user_agent)?.bytes()?)
+    download_with_retry_bytes_opt(url, max_retries, timeout_secs, user_agent, None)
+}
+
+/// Download a URL with retry, exponential backoff, and timeout, with an optional Authorization header.
+///
+/// This is useful for gated datasets on HuggingFace that require an access token.
+///
+/// * `url` - the URL to download
+/// * `max_retries` - number of retry attempts (0 = no retry)
+/// * `timeout_secs` - per-request timeout in seconds
+/// * `user_agent` - User-Agent header to identify the caller
+/// * `auth_header` - optional Bearer token (e.g., from HF_TOKEN env var)
+pub fn download_with_retry_bytes_opt(
+    url: &str,
+    max_retries: u32,
+    timeout_secs: u64,
+    user_agent: &str,
+    auth_header: Option<&str>,
+) -> Result<bytes::Bytes> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()?;
+    let mut last_err = None;
+    for attempt in 0..=max_retries {
+        let mut request = client.get(url).header("User-Agent", user_agent);
+        if let Some(token) = auth_header {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = request.send();
+        match resp {
+            Ok(resp) => return Ok(resp.bytes()?),
+            Err(e) => {
+                if attempt < max_retries {
+                    let wait_time = Duration::from_secs(2u64.pow(attempt));
+                    eprintln!(
+                        "  Download {} failed (attempt {}/{}) after waiting {}s: {}",
+                        url,
+                        attempt + 1,
+                        max_retries,
+                        wait_time.as_secs(),
+                        e
+                    );
+                    std::thread::sleep(wait_time);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    let last_err = last_err.unwrap();
+    Err(anyhow::Error::from(last_err).context(format!(
+        "Failed to download {} after {} retries ({}s timeout)",
+        url, max_retries, timeout_secs
+    )))
 }
 
 #[cfg(test)]
