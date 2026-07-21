@@ -39,6 +39,10 @@ build-release:
 swebench-harness-image:
 	docker build -f docker/swebench-harness/Dockerfile -t llm-benchmark-runner/swebench-harness:latest docker/swebench-harness
 
+# Build Docker image (default: includes official minebench renderer, requires Node.js during build)
+docker:
+	docker build -t llm-benchmark-runner .
+
 # Build docs
 docs:
 	cargo doc --open --no-deps

@@ -42,6 +42,18 @@ For full-fidelity Minecraft-like voxel rendering using the official [Ammaar-Alam
 
 The default build (`cargo build`) uses a lightweight custom renderer with no extra dependencies.
 
+### Docker (Default — with Official Minebench Renderer)
+
+The Docker build **always includes the official renderer** (Node.js is installed during the build step automatically):
+
+```bash
+docker build -t llm-benchmark-runner .
+# or
+make docker
+```
+
+This produces an image with the full-fidelity texture-atlas voxel renderer.
+
 ## Configuration
 
 Edit `models_config.yaml`. Each model is:

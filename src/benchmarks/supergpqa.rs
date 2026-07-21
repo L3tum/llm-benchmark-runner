@@ -329,7 +329,7 @@ impl super::Benchmark for SuperGpqaBenchmark {
             let question_text = q.question.clone();
             let mut prompt = format!(
                 "The following are multiple choice questions (with answers) about {}. Think step by step and then output the answer in the format of \"The answer is (X)\" at the end.\n\n",
-                &q.subfield
+                q.subfield
             );
             prompt.push_str(&format!("Question: {}\nOptions: ", question_text));
             for (i, opt) in q.options.iter().enumerate() {

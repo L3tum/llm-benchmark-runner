@@ -33,6 +33,7 @@ reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-fea
 
 [features]
 renderer-official = [] # requires Node.js on build machine; see README
+renderer-lightweight = [] # explicit lightweight renderer (no Node.js required)
 
 [profile.release]
 opt-level = 3

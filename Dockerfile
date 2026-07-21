@@ -9,7 +9,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN rustup target add x86_64-unknown-linux-musl \
     && apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools \
+    && apt-get install -y --no-install-recommends musl-tools nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -17,7 +17,7 @@ COPY . .
 
 RUN --mount=type=cache,id=llm-benchmark-runner-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=llm-benchmark-runner-target,target=/build/target \
-    cargo build --target x86_64-unknown-linux-musl --release \
+    cargo build --target x86_64-unknown-linux-musl --release --features renderer-official \
     && cp target/x86_64-unknown-linux-musl/release/llm-benchmark-runner /llm-benchmark-runner
 
 # Runtime includes only the Docker CLI and our static binary. To let
