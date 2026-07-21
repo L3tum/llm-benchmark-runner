@@ -142,6 +142,7 @@ impl Client {
         let url = self.base_url.join("chat/completions")?;
         let mut req = serde_json::json!({
             "model": model_name,
+            "max_tokens": 16_000,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -190,6 +191,7 @@ impl Client {
         let url = self.base_url.join("chat/completions")?;
         let mut req = serde_json::json!({
             "model": model_name,
+            "max_tokens": 16_000,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -197,7 +199,7 @@ impl Client {
             "logprobs": true,
             "top_logprobs": 10,
         });
-        // Merge model params last so they take final precedence (overrides logprobs, top_logprobs, etc.)
+        // Merge model params last so they take final precedence (overrides max_tokens, logprobs, top_logprobs, etc.)
         if let Some(params) = &self.model_params {
             if let Some(req_obj) = req.as_object_mut() {
                 for (k, v) in params {
