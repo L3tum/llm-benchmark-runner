@@ -1,12 +1,14 @@
-use crate::client::Client;
+use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::BenchmarkResult;
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Single AIME problem with problem statement and integer answer.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -15,7 +17,25 @@ pub struct AimeItem {
     pub answer: String,
 }
 
-pub struct AimeBenchmark;
+pub struct AimeBenchmark {
+    state: Mutex<AimeState>,
+}
+
+struct AimeState {
+    items: Vec<AimeItem>,
+    current_idx: usize,
+}
+
+impl Default for AimeBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(AimeState {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 fn load_aime_json(path: &PathBuf) -> Result<Vec<AimeItem>> {
     let content = fs::read_to_string(path)?;
@@ -40,7 +60,7 @@ fn load_aime_json(path: &PathBuf) -> Result<Vec<AimeItem>> {
     Ok(result)
 }
 
-impl super::Benchmark for AimeBenchmark {
+impl Benchmark for AimeBenchmark {
     fn name(&self) -> &str {
         "aime"
     }
@@ -49,43 +69,121 @@ impl super::Benchmark for AimeBenchmark {
         "AIME"
     }
 
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::Math
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::Math
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
-        // Download the AIME 2025 test split
         let year = config
             .get("year")
             .and_then(|v| v.as_str())
             .unwrap_or("2025");
-        self.download_dataset(year)?;
+        let data_path = self.download_dataset(year)?;
+        let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
+        let all_items = load_aime_json(&data_path)?;
+        let items = match num_samples {
+            Some(n) if all_items.len() > n as usize => all_items[..n as usize].to_vec(),
+            _ => all_items,
+        };
+
+        println!(
+            "Evaluating AIME {}: {} problems (zero-shot CoT)",
+            year,
+            items.len()
+        );
+
+        let mut state = self.state.lock().unwrap();
+        state.items = items;
+        state.current_idx = 0;
         Ok(())
+    }
+
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (q, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let q = state.items[idx].clone();
+            state.current_idx += 1;
+            (q, idx)
+        };
+
+        let prompt = format!(
+            "You are a math competition solver. Solve the following problem step by step. The answer is an integer between 000 and 999. Put your final answer in the format of \"\\boxed{{answer}}\" at the end.\n\n{}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+            q.problem
+        );
+
+        let response = tracker.chat_completion(&model.model_name, "", &prompt)?;
+        let extracted_answer = extract_int_answer(&response);
+        let is_correct = extracted_answer.as_deref() == Some(&q.answer);
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                is_correct,
+                if is_correct { 1.0 } else { 0.0 },
+                vec![],
+            )
+            .with_metadata(Some(serde_json::json!({
+                "expected": q.answer,
+                "extracted": extracted_answer.unwrap_or_default(),
+                "correct": is_correct,
+            }))),
+        ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        use crate::reports::model::{Score, ScoreUnit};
 
-        let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_questions = raw
-            .get("total_questions")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let correct = raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let (total, correct, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let correct = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (total, correct, out, think)
+            } else {
+                (
+                    raw.get("total_questions")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+
+        let accuracy = if total > 0 {
+            correct as f64 / total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(
             "accuracy".to_string(),
-            Score::float(accuracy, ScoreUnit::Percent)
+            Score::float(accuracy * 100.0, ScoreUnit::Percent)
                 .primary(true)
                 .higher_is_better(true),
         );
@@ -95,7 +193,7 @@ impl super::Benchmark for AimeBenchmark {
         );
         scores.insert(
             "total_questions".to_string(),
-            Score::integer(total_questions, ScoreUnit::Count),
+            Score::integer(total, ScoreUnit::Count),
         );
         if output_tokens > 0 {
             scores.insert(
@@ -117,88 +215,6 @@ impl super::Benchmark for AimeBenchmark {
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),
-        })
-    }
-
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
-        let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
-
-        let year = config
-            .get("year")
-            .and_then(|v| v.as_str())
-            .unwrap_or("2025");
-        let data_path = self.download_dataset(year)?;
-        let all_items = load_aime_json(&data_path)?;
-
-        let questions = match num_samples {
-            Some(n) if all_items.len() > n as usize => all_items[..n as usize].to_vec(),
-            _ => all_items,
-        };
-
-        println!(
-            "\nEvaluating AIME {}: {} problems (zero-shot CoT)",
-            year,
-            questions.len()
-        );
-
-        let mut correct = 0usize;
-        let mut total = 0usize;
-        let mut total_output_tokens: u64 = 0;
-        let mut total_thinking_tokens: u64 = 0;
-        let mut problem_results: HashMap<usize, serde_json::Value> = HashMap::new();
-
-        for (idx, q) in questions.iter().enumerate() {
-            let problem_text = q.problem.clone();
-            let prompt = format!(
-                "You are a math competition solver. Solve the following problem step by step. The answer is an integer between 000 and 999. Put your final answer in the format of \"\\boxed{{answer}}\" at the end.\n\n{}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
-                problem_text
-            );
-
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, "", &prompt)?;
-            total_output_tokens += output_tokens.unwrap_or(0);
-            total_thinking_tokens += thinking_tokens.unwrap_or(0);
-            let extracted_answer = extract_int_answer(&response);
-            let is_correct = extracted_answer.as_deref() == Some(&q.answer);
-            if is_correct {
-                correct += 1;
-            }
-            total += 1;
-
-            problem_results.insert(
-                idx,
-                serde_json::json!({
-                    "correct": is_correct,
-                    "expected": q.answer,
-                    "extracted": extracted_answer.unwrap_or_default()
-                }),
-            );
-        }
-
-        let accuracy = if total > 0 {
-            correct as f64 / total as f64
-        } else {
-            0.0
-        };
-
-        // Build the raw JSON for backwards compatibility
-        let raw_json = serde_json::json!({
-            "accuracy": accuracy,
-            "total_questions": total,
-            "correct": correct,
-            "problem_results": problem_results,
-            "output_tokens": total_output_tokens,
-            "thinking_tokens": total_thinking_tokens,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw_json,
         })
     }
 }

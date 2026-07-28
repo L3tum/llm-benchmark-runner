@@ -1,10 +1,15 @@
 use crate::benchmarks::mmlu_pro::MmluProBenchmark;
-use crate::client::{Client, LogprobEntry};
+use crate::benchmarks::Benchmark;
+use crate::client::LogprobEntry;
 use crate::config::Model;
-use crate::reports::model::{BenchmarkResult, BreakdownTable, Score, ScoreUnit, TestAggregate};
+use crate::reports::model::{
+    BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit, TaskResult, TestAggregate,
+};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::sync::Mutex;
 
 fn load_prompts_from_file(path: &str, num_prompts: usize) -> Result<Vec<String>> {
     let content = fs::read_to_string(path)?;
@@ -23,7 +28,25 @@ fn load_prompts_from_file(path: &str, num_prompts: usize) -> Result<Vec<String>>
     }
 }
 
-pub struct KldBenchmark;
+pub struct KldBenchmark {
+    state: Mutex<KldState>,
+}
+
+struct KldState {
+    prompts: Vec<String>,
+    current_idx: usize,
+}
+
+impl Default for KldBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(KldState {
+                prompts: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 fn compute_kl_from_logprobs(logprobs_a: &[LogprobEntry], logprobs_b: &[LogprobEntry]) -> f64 {
     if logprobs_a.is_empty() || logprobs_b.is_empty() {
@@ -68,7 +91,7 @@ fn compute_kl_from_logprobs(logprobs_a: &[LogprobEntry], logprobs_b: &[LogprobEn
     kl
 }
 
-impl super::Benchmark for KldBenchmark {
+impl Benchmark for KldBenchmark {
     fn name(&self) -> &str {
         "kld"
     }
@@ -77,16 +100,14 @@ impl super::Benchmark for KldBenchmark {
         "KLD"
     }
 
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::Similarity
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::Similarity
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        use crate::reports::model::{Diagnostic, Score, ScoreUnit};
+        use crate::reports::model::Diagnostic;
 
-        // Per-model raw result structure (from execute):
-        // { model, num_prompts, kld: [...], output_tokens, thinking_tokens }
         let num_prompts = raw.get("num_prompts").and_then(|v| v.as_i64()).unwrap_or(0);
         let output_tokens = raw
             .get("output_tokens")
@@ -115,7 +136,6 @@ impl super::Benchmark for KldBenchmark {
             );
         }
 
-        // Add diagnostic noting that cross-model KLD is in the aggregate
         let diagnostics = vec![Diagnostic {
             level: "info".to_string(),
             message: "KLD score (similarity to other models) is shown in the aggregate/pairwise \
@@ -173,14 +193,7 @@ impl super::Benchmark for KldBenchmark {
         Ok(None)
     }
 
-    fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let mmlu = MmluProBenchmark;
-        mmlu.pre_execute(&yaml_serde::Value::Null)?;
-        Ok(())
-    }
-
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let num_prompts: usize = config
             .get("num_prompts")
             .and_then(|v| v.as_i64())
@@ -198,7 +211,8 @@ impl super::Benchmark for KldBenchmark {
             }
             None if prompt_source == "mmlu" => {
                 println!("  Using MMLU-Pro test prompts for KLD");
-                let mmlu = MmluProBenchmark;
+                let mmlu = MmluProBenchmark::default();
+                mmlu.pre_execute(&yaml_serde::Value::Null)?;
                 let test_path = mmlu.download_dataset("test")?;
                 let items = mmlu.load_dataset(&test_path)?;
                 items
@@ -219,65 +233,63 @@ impl super::Benchmark for KldBenchmark {
             return Err(anyhow::anyhow!("No prompts loaded for KLD"));
         }
 
-        let mut model_logprobs: Vec<Vec<LogprobEntry>> = Vec::new();
-        let mut total_output_tokens: i64 = 0;
-        let mut total_thinking_tokens: i64 = 0;
-        let mut failed = 0;
+        let mut state = self.state.lock().unwrap();
+        state.prompts = prompts;
+        state.current_idx = 0;
+        Ok(())
+    }
 
-        for prompt in &prompts {
-            match client.chat_completion_logprobs_with_usage(
-                &model.model_name,
-                "You are a helpful assistant.",
-                prompt,
-            ) {
-                Ok((logprobs, output_tokens, thinking_tokens)) => {
-                    total_output_tokens += output_tokens.unwrap_or(0) as i64;
-                    total_thinking_tokens += thinking_tokens.unwrap_or(0) as i64;
-                    model_logprobs.push(logprobs);
-                }
-                Err(e) => {
-                    eprintln!("  Error getting logprobs for {}: {}", model.display_name, e);
-                    model_logprobs.push(Vec::new());
-                    failed += 1;
-                }
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (prompt, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.prompts.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let prompt = state.prompts[idx].clone();
+            state.current_idx += 1;
+            (prompt, idx)
+        };
+
+        match tracker.chat_completion_logprobs_with_usage(
+            &model.model_name,
+            "You are a helpful assistant.",
+            &prompt,
+        ) {
+            Ok(logprobs) => {
+                // Serialize logprobs to JSON for storage in metadata
+                let logprobs_json: Vec<serde_json::Value> = logprobs
+                    .iter()
+                    .map(|e| serde_json::json!({ "token": e.token, "logprob": e.logprob }))
+                    .collect();
+
+                Ok(Some(
+                    TaskResult::new(format!("task-{}", idx), true, 1.0, vec![]).with_metadata(
+                        Some(serde_json::json!({
+                            "prompt": prompt,
+                            "logprobs": logprobs_json,
+                        })),
+                    ),
+                ))
+            }
+            Err(e) => {
+                eprintln!("  Error getting logprobs for {}: {}", model.display_name, e);
+                Ok(Some(
+                    TaskResult::new(format!("task-{}", idx), false, 0.0, vec![]).with_metadata(
+                        Some(serde_json::json!({
+                            "prompt": prompt,
+                            "error": e.to_string(),
+                            "logprobs": [],
+                        })),
+                    ),
+                ))
             }
         }
-
-        if failed > prompts.len() as i64 * 3 / 10 {
-            println!(
-                "  WARNING: {}/{} KLD prompt failures ({:.0}%%)",
-                failed,
-                prompts.len(),
-                (failed as f64 / prompts.len() as f64) * 100.0
-            );
-        }
-
-        // Build raw JSON
-        let raw_json = serde_json::json!({
-            "model": model.display_name,
-            "num_prompts": prompts.len(),
-            "kld": model_logprobs,
-            "output_tokens": total_output_tokens,
-            "thinking_tokens": total_thinking_tokens,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!(
-                    "KLD: {} prompts evaluated, {}/{} failures ({:.0}%%)",
-                    prompts.len(),
-                    failed,
-                    prompts.len(),
-                    (failed as f64 / prompts.len() as f64) * 100.0
-                ),
-            }],
-            raw: raw_json,
-        })
     }
 
     fn post_execute(
@@ -288,33 +300,61 @@ impl super::Benchmark for KldBenchmark {
         let mut missing_models = Vec::new();
 
         for (name, result) in model_results {
-            if let Some(kld_arr) = result.raw.get("kld").and_then(|v| v.as_array()) {
-                let mut entries: Vec<Vec<LogprobEntry>> = Vec::new();
-                for arr in kld_arr {
-                    if let Some(inner) = arr.as_array() {
+            // Try per_task format first (new format)
+            let entries =
+                if let Some(per_task) = result.raw.get("per_task").and_then(|v| v.as_array()) {
+                    let mut entries: Vec<Vec<LogprobEntry>> = Vec::new();
+                    for task in per_task {
                         let mut logprobs: Vec<LogprobEntry> = Vec::new();
-                        for item in inner {
-                            if let (Some(token), Some(logprob)) =
-                                (item.get("token"), item.get("logprob"))
-                            {
+                        if let Some(lp_arr) = task.get("logprobs").and_then(|v| v.as_array()) {
+                            for item in lp_arr {
                                 if let (Some(token), Some(logprob)) =
-                                    (token.as_str(), logprob.as_f64())
+                                    (item.get("token"), item.get("logprob"))
                                 {
-                                    logprobs.push(LogprobEntry {
-                                        token: token.to_string(),
-                                        logprob,
-                                    });
+                                    if let (Some(token), Some(logprob)) =
+                                        (token.as_str(), logprob.as_f64())
+                                    {
+                                        logprobs.push(LogprobEntry {
+                                            token: token.to_string(),
+                                            logprob,
+                                        });
+                                    }
                                 }
                             }
                         }
                         entries.push(logprobs);
                     }
-                }
-                all_logits.insert(name.clone(), entries);
-            } else {
-                // Model failed to produce KLD data
-                missing_models.push(name.clone());
-            }
+                    entries
+                // Fallback: old kld array format
+                } else if let Some(kld_arr) = result.raw.get("kld").and_then(|v| v.as_array()) {
+                    let mut entries: Vec<Vec<LogprobEntry>> = Vec::new();
+                    for arr in kld_arr {
+                        if let Some(inner) = arr.as_array() {
+                            let mut logprobs: Vec<LogprobEntry> = Vec::new();
+                            for item in inner {
+                                if let (Some(token), Some(logprob)) =
+                                    (item.get("token"), item.get("logprob"))
+                                {
+                                    if let (Some(token), Some(logprob)) =
+                                        (token.as_str(), logprob.as_f64())
+                                    {
+                                        logprobs.push(LogprobEntry {
+                                            token: token.to_string(),
+                                            logprob,
+                                        });
+                                    }
+                                }
+                            }
+                            entries.push(logprobs);
+                        }
+                    }
+                    entries
+                } else {
+                    missing_models.push(name.clone());
+                    continue;
+                };
+
+            all_logits.insert(name.clone(), entries);
         }
 
         // If any model is missing KLD data, return a clear error instead of silently ignoring it.

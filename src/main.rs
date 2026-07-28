@@ -8,6 +8,7 @@ mod error_classes;
 mod report;
 mod reports;
 mod runner;
+mod token_tracker;
 mod utils;
 
 use anyhow::Result;

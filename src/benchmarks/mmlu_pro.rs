@@ -1,14 +1,15 @@
-use crate::benchmarks::answer_classifier::{classify_wrong_answer, WrongAnswerClass};
-use crate::client::Client;
+use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::BenchmarkResult;
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MmluItem {
@@ -19,7 +20,25 @@ pub struct MmluItem {
     pub category: String,
 }
 
-pub struct MmluProBenchmark;
+pub struct MmluProBenchmark {
+    state: Mutex<MmluProState>,
+}
+
+struct MmluProState {
+    items: Vec<MmluItem>,
+    current_idx: usize,
+}
+
+impl Default for MmluProBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(MmluProState {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 impl MmluProBenchmark {
     pub fn download_dataset(&self, split: &str) -> Result<PathBuf> {
@@ -62,7 +81,7 @@ impl MmluProBenchmark {
     }
 }
 
-impl super::Benchmark for MmluProBenchmark {
+impl Benchmark for MmluProBenchmark {
     fn name(&self) -> &str {
         "mmlu_pro"
     }
@@ -71,45 +90,127 @@ impl super::Benchmark for MmluProBenchmark {
         "MMLU-Pro"
     }
 
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::Knowledge
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::Knowledge
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        // Download both test and validation datasets
-        self.download_dataset("test")?;
-        self.download_dataset("validation")?;
+        let data_path = self.download_dataset("test")?;
+        let all_items = self.load_dataset(&data_path)?;
+        println!("MMLU-Pro: {} total questions", all_items.len());
+        let mut state = self.state.lock().unwrap();
+        state.items = all_items;
+        state.current_idx = 0;
         Ok(())
     }
 
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (q, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let q = state.items[idx].clone();
+            state.current_idx += 1;
+            (q, idx)
+        };
+
+        let question_text = q.question.clone();
+        let mut prompt = format!(
+            "The following are multiple choice questions (with answers) about {}. Think step by step and then output the answer in the format of \"The answer is (X)\" at the end.\n\n",
+            q.category
+        );
+        prompt.push_str(&format!("Question: {}\nOptions: ", question_text));
+        let choice_map = "ABCDEFGH";
+        for (i, opt) in q.options.iter().enumerate() {
+            if i < choice_map.len() {
+                prompt.push_str(&format!("{}: {}\n", &choice_map[i..i + 1], opt));
+            }
+        }
+        prompt.push_str("Answer: ");
+
+        let response = tracker.chat_completion(&model.model_name, "", &prompt)?;
+        let pred = extract_answer(&response);
+        let expected = q.answer.chars().next();
+        let is_correct = pred == expected;
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                is_correct,
+                if is_correct { 1.0 } else { 0.0 },
+                vec![q.category.clone()],
+            )
+            .with_metadata(Some(serde_json::json!({
+                "question": question_text,
+                "expected": expected.map(|c| c.to_string()),
+                "predicted": pred.map(|c| c.to_string()),
+                "correct": is_correct,
+            }))),
+        ))
+    }
+
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let raw = &b.raw;
         use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
 
-        let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_questions = raw
-            .get("total_questions")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let raw = &b.raw;
+
+        let (total, correct, _wrong, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let correct = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let wrong = total - correct;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (total, correct, wrong, out, think)
+            } else {
+                (
+                    raw.get("total_questions")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("wrong").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+
+        let accuracy = if total > 0 {
+            correct as f64 / total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(
             "accuracy".to_string(),
-            Score::float(accuracy, ScoreUnit::Percent)
+            Score::float(accuracy * 100.0, ScoreUnit::Percent)
                 .primary(true)
                 .higher_is_better(true),
         );
         scores.insert(
             "total_questions".to_string(),
-            Score::integer(total_questions, ScoreUnit::Count),
+            Score::integer(total, ScoreUnit::Count),
         );
         if output_tokens > 0 {
             scores.insert(
@@ -124,240 +225,66 @@ impl super::Benchmark for MmluProBenchmark {
             );
         }
 
-        // Subject breakdown
-        let mut subject_rows = BTreeMap::new();
-        if let Some(subjects) = raw.get("results_by_subject").and_then(|v| v.as_object()) {
-            for (subject, data) in subjects {
-                if let Some(obj) = data.as_object() {
-                    let acc = obj.get("acc").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let correct = obj.get("corr").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let wrong = obj.get("wrong").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let mut row_scores = BTreeMap::new();
-                    row_scores.insert(
-                        "accuracy".to_string(),
-                        Score::float(acc, ScoreUnit::Percent),
-                    );
-                    row_scores.insert(
-                        "correct".to_string(),
-                        Score::integer(correct, ScoreUnit::Count),
-                    );
-                    row_scores.insert("wrong".to_string(), Score::integer(wrong, ScoreUnit::Count));
-                    subject_rows.insert(subject.clone(), row_scores);
+        let mut category_rows = BTreeMap::new();
+        if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+            let mut cat_map: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+            for task in per_task {
+                if let Some(cats) = task.get("categories").and_then(|v| v.as_array()) {
+                    for cat in cats {
+                        if let Some(cat_name) = cat.as_str() {
+                            let entry = cat_map.entry(cat_name.to_string()).or_insert((0, 0));
+                            entry.1 += 1;
+                            if task
+                                .get("passed")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
+                                entry.0 += 1;
+                            }
+                        }
+                    }
                 }
             }
+            for (cat, (corr, t)) in cat_map {
+                let acc = if t > 0 { corr as f64 / t as f64 } else { 0.0 };
+                category_rows.insert(
+                    cat,
+                    BTreeMap::from([
+                        (
+                            "accuracy".to_string(),
+                            Score::float(acc * 100.0, ScoreUnit::Percent),
+                        ),
+                        (
+                            "correct".to_string(),
+                            Score::integer(corr, ScoreUnit::Count),
+                        ),
+                        (
+                            "wrong".to_string(),
+                            Score::integer(t - corr, ScoreUnit::Count),
+                        ),
+                    ]),
+                );
+            }
         }
+
         let mut breakdowns = BTreeMap::new();
-        if !subject_rows.is_empty() {
+        if !category_rows.is_empty() {
             breakdowns.insert(
-                "subjects".to_string(),
+                "categories".to_string(),
                 BreakdownTable {
-                    title: "Subject Breakdown".to_string(),
-                    rows: subject_rows,
+                    title: "Category Breakdown".to_string(),
+                    rows: category_rows,
                 },
             );
         }
 
-        // Parse error classification from raw JSON (display names → typed enum)
-        let error_classification: BTreeMap<WrongAnswerClass, i64> = raw
-            .get("error_classification")
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(key, val)| {
-                        let class = match key.as_str() {
-                            "Wrong Answer Key" => Some(WrongAnswerClass::WrongAnswerKey),
-                            "Invalid Answer Key" => Some(WrongAnswerClass::InvalidAnswerKey),
-                            "No Answer" => Some(WrongAnswerClass::NoAnswer),
-                            "Uncertainty" => Some(WrongAnswerClass::Uncertainty),
-                            "Refused" => Some(WrongAnswerClass::Refused),
-                            "Looping" => Some(WrongAnswerClass::Looping),
-                            "Truncated" => Some(WrongAnswerClass::Truncated),
-                            "Off-Topic / Hallucination" => Some(WrongAnswerClass::OffTopic),
-                            _ => None,
-                        };
-                        class.zip(val.as_i64())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
         Ok(BenchmarkResult {
             scores,
             breakdowns,
-            error_classification,
+            error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),
-        })
-    }
-
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
-        let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
-        let subjects_filter = config.get("subjects");
-        let subjects: Option<Vec<String>> = match subjects_filter {
-            Some(s) if s.is_string() => Some(
-                s.as_str()
-                    .unwrap()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect(),
-            ),
-            Some(s) if s.is_null() => None,
-            _ => None,
-        };
-
-        let test_path = self.download_dataset("test")?;
-        let val_path = self.download_dataset("validation")?;
-        let test_items = self.load_dataset(&test_path)?;
-        let val_items = self.load_dataset(&val_path)?;
-        let test_data = Self::group_by_category(test_items);
-        let val_data = Self::group_by_category(val_items);
-
-        let subjects_to_eval = subjects.unwrap_or_else(|| test_data.keys().cloned().collect());
-
-        let mut category_record: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut total_questions = 0usize;
-        let mut total_output_tokens: u64 = 0;
-        let mut total_thinking_tokens: u64 = 0;
-        let mut overall_wrong_classes: BTreeMap<WrongAnswerClass, i64> = BTreeMap::new();
-
-        let choice_map = "ABCDEFGHIJ";
-
-        for category in &subjects_to_eval {
-            let test_questions = test_data
-                .get(category)
-                .ok_or_else(|| anyhow::anyhow!("Category {} not found", category))?
-                .clone();
-            let test_questions = match num_samples {
-                Some(n) if test_questions.len() > n as usize => {
-                    test_questions[..n as usize].to_vec()
-                }
-                _ => test_questions,
-            };
-
-            // Few-shot examples from validation set
-            let cot_examples: Vec<&MmluItem> = val_data
-                .get(category)
-                .map(|items| items.iter().take(5).collect())
-                .unwrap_or_default();
-
-            println!(
-                "\nEvaluating {}: {} questions",
-                category,
-                test_questions.len()
-            );
-
-            let mut category_correct = 0usize;
-            let mut category_total = 0usize;
-
-            for q in &test_questions {
-                let question_text = q.question.clone();
-
-                // Build prompt with CoT examples
-                let mut prompt = format!(
-                    "The following are multiple choice questions (with answers) about {}. Think step by step and then output the answer in the format of \"The answer is (X)\" at the end.\n\n",
-                    category
-                );
-
-                for ex in &cot_examples {
-                    prompt.push_str(&format!("Question: {}\nOptions: ", ex.question));
-                    for (i, opt) in ex.options.iter().enumerate() {
-                        prompt.push_str(&format!("{}: {}\n", &choice_map[i..i + 1], opt));
-                    }
-                    let cot = ex
-                        .cot_content
-                        .as_deref()
-                        .unwrap_or("Let's think step by step.");
-                    let cot_clean = if let Some(stripped) = cot.strip_prefix("A: ") {
-                        stripped
-                    } else {
-                        cot
-                    };
-                    prompt.push_str(&format!("Answer: {}\n\n", cot_clean));
-                }
-
-                // Current question
-                prompt.push_str(&format!("Question: {}\nOptions: ", question_text));
-                for (i, opt) in q.options.iter().enumerate() {
-                    prompt.push_str(&format!("{}: {}\n", &choice_map[i..i + 1], opt));
-                }
-                prompt.push_str("Answer: ");
-
-                let (response, output_tokens, thinking_tokens) =
-                    client.chat_completion(&model.model_name, "", &prompt)?;
-                total_output_tokens += output_tokens.unwrap_or(0);
-                total_thinking_tokens += thinking_tokens.unwrap_or(0);
-                let pred = extract_answer(&response);
-                let is_correct = pred == q.answer.chars().next();
-                if !is_correct {
-                    let wrong_class = classify_wrong_answer(
-                        &response,
-                        &question_text,
-                        q.answer.chars().next().unwrap_or('?'),
-                        pred,
-                    );
-                    let counter = overall_wrong_classes.entry(wrong_class).or_insert(0);
-                    *counter += 1;
-                }
-                if is_correct {
-                    category_correct += 1;
-                }
-                category_total += 1;
-                total_questions += 1;
-            }
-
-            let accuracy = if category_total > 0 {
-                category_correct as f64 / category_total as f64
-            } else {
-                0.0
-            };
-            let mut record = serde_json::Map::new();
-            record.insert("acc".to_string(), serde_json::json!(accuracy));
-            record.insert("corr".to_string(), serde_json::json!(category_correct));
-            record.insert(
-                "wrong".to_string(),
-                serde_json::json!(category_total - category_correct),
-            );
-            let _: Option<serde_json::Value> =
-                category_record.insert(category.clone(), serde_json::Value::Object(record));
-        }
-
-        let total_correct: i64 = category_record
-            .values()
-            .map(|r| r["corr"].as_i64().unwrap_or(0))
-            .sum();
-        let total_wrong: i64 = category_record
-            .values()
-            .map(|r| r["wrong"].as_i64().unwrap_or(0))
-            .sum();
-        let overall_accuracy = if total_correct + total_wrong > 0 {
-            total_correct as f64 / (total_correct + total_wrong) as f64
-        } else {
-            0.0
-        };
-
-        // Build raw JSON
-        let error_classification_display: BTreeMap<String, i64> = overall_wrong_classes
-            .iter()
-            .map(|(k, v)| (k.display().to_string(), *v))
-            .collect();
-        let raw_json = serde_json::json!({
-            "accuracy": overall_accuracy,
-            "results_by_subject": category_record,
-            "total_questions": total_questions,
-            "output_tokens": total_output_tokens,
-            "thinking_tokens": total_thinking_tokens,
-            "error_classification": error_classification_display,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: overall_wrong_classes,
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw_json,
         })
     }
 }

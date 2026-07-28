@@ -1,22 +1,38 @@
 use crate::benchmarks::Benchmark;
-use crate::client::Client;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit};
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 /// CNN/Daily Mail benchmark with ROUGE-based faithfulness proxy.
 ///
 /// NOTE: The XSum Faithfulness dataset (EdinburghNLP/xsum_faithfulness) provides human-annotated
 /// hallucination spans. Since it is gated, we use ROUGE overlap with the human-written highlights
 /// as a faithfulness proxy — a summary that closely matches the faithful reference is likely faithful.
-pub struct CnnDailyMailBenchmark;
+pub struct CnnDailyMailBenchmark {
+    state: Mutex<CnnDmState>,
+}
 
-static DATASET: OnceLock<Vec<CnnDmItem>> = OnceLock::new();
+struct CnnDmState {
+    items: Vec<CnnDmItem>,
+    current_idx: usize,
+}
+
+impl Default for CnnDailyMailBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(CnnDmState {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct CnnDmItem {
@@ -25,46 +41,43 @@ struct CnnDmItem {
     highlights: String,
 }
 
-fn load_cnn_dailymail() -> &'static Vec<CnnDmItem> {
-    DATASET.get_or_init(|| {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_default()
-            .join("llm-benchmark-runner")
-            .join("cnn_dailymail");
-        let path = cache_dir.join("cnn_dailymail.json");
+fn load_cnn_dailymail() -> Vec<CnnDmItem> {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_default()
+        .join("llm-benchmark-runner")
+        .join("cnn_dailymail");
+    let path = cache_dir.join("cnn_dailymail.json");
 
-        if path.exists() {
-            let content = fs::read_to_string(&path).expect("Failed to read cached CNN/DM");
-            return serde_json::from_str(&content).expect("Failed to parse CNN/DM");
+    if path.exists() {
+        let content = fs::read_to_string(&path).expect("Failed to read cached CNN/DM");
+        return serde_json::from_str(&content).expect("Failed to parse CNN/DM");
+    }
+
+    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    println!("  Downloading CNN/Daily Mail dataset...");
+    let url = "https://huggingface.co/datasets/EdinburghNLP/cnn_dailymail/resolve/main/test.csv";
+    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+        .expect("Failed to download CNN/DM");
+
+    // Parse CSV (3 columns: id, article, highlights)
+    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
+    let mut items = Vec::new();
+    for line in content.lines().skip(1) {
+        if line.is_empty() {
+            continue;
         }
-
-        fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-        println!("  Downloading CNN/Daily Mail dataset...");
-        let url =
-            "https://huggingface.co/datasets/EdinburghNLP/cnn_dailymail/resolve/main/test.csv";
-        let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-            .expect("Failed to download CNN/DM");
-
-        // Parse CSV (3 columns: id, article, highlights)
-        let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
-        let mut items = Vec::new();
-        for line in content.lines().skip(1) {
-            if line.is_empty() {
-                continue;
-            }
-            let fields: Vec<&str> = line.split(",").collect();
-            if fields.len() >= 3 {
-                items.push(CnnDmItem {
-                    id: fields[0].trim_matches('"').to_string(),
-                    article: fields[1].trim_matches('"').to_string(),
-                    highlights: fields[2].trim_matches('"').to_string(),
-                });
-            }
+        let fields: Vec<&str> = line.split(",").collect();
+        if fields.len() >= 3 {
+            items.push(CnnDmItem {
+                id: fields[0].trim_matches('"').to_string(),
+                article: fields[1].trim_matches('"').to_string(),
+                highlights: fields[2].trim_matches('"').to_string(),
+            });
         }
+    }
 
-        fs::write(&path, &bytes).expect("Failed to save CNN/DM");
-        items
-    })
+    fs::write(&path, &bytes).expect("Failed to save CNN/DM");
+    items
 }
 
 impl Benchmark for CnnDailyMailBenchmark {
@@ -81,88 +94,113 @@ impl Benchmark for CnnDailyMailBenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let _ = load_cnn_dailymail();
+        let items = load_cnn_dailymail();
+        let mut state = self.state.lock().unwrap();
+        state.items = items;
+        state.current_idx = 0;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let dataset = load_cnn_dailymail();
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (item, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            (item, idx)
+        };
 
         let system_prompt =
             "You are a summarisation expert. Given a news article, write a few-sentence summary (3-5 sentences) that captures the key points. Do not include any information not present in the article.";
 
-        let user_prompt = r#"Article: {article}
-Summary:"#;
+        let user_prompt = "Article: {article}\nSummary:";
+        let prompt = user_prompt.replace("{article}", &item.article);
 
-        let total = dataset.len();
-        let mut rouge1_score = 0.0;
-        let mut rouge2_score = 0.0;
-        let mut rouge_l_score = 0.0;
-        let mut output_tokens_total: i64 = 0;
-        let mut thinking_tokens_total: i64 = 0;
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
 
-        for item in dataset {
-            let prompt = user_prompt.replace("{article}", &item.article);
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let reference = item.highlights.trim();
+        let prediction = response.trim();
+        let (r1, r2, r_l) = compute_rouge_scores(reference, prediction);
 
-            output_tokens_total += output_tokens.unwrap_or(0) as i64;
-            thinking_tokens_total += thinking_tokens.unwrap_or(0) as i64;
-
-            let reference = item.highlights.trim();
-            let prediction = response.trim();
-            let (r1, r2, r_l) = compute_rouge_scores(reference, prediction);
-            rouge1_score += r1;
-            rouge2_score += r2;
-            rouge_l_score += r_l;
-        }
-
-        let rouge1 = rouge1_score / total as f64;
-        let rouge2 = rouge2_score / total as f64;
-        let rouge_l = rouge_l_score / total as f64;
-
-        let raw_json = serde_json::json!({
-            "rouge1": rouge1,
-            "rouge2": rouge2,
-            "rouge_l": rouge_l,
-            "total": total,
-            "output_tokens": output_tokens_total,
-            "thinking_tokens": thinking_tokens_total,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!(
-                    "CNN/DM (Faithfulness Proxy): ROUGE-1 {:.1}%, ROUGE-2 {:.1}%, ROUGE-L {:.1}% — overlap with human-annotated faithful highlights",
-                    rouge1 * 100.0,
-                    rouge2 * 100.0,
-                    rouge_l * 100.0
-                ),
-            }],
-            raw: raw_json,
-        })
+        Ok(Some(
+            TaskResult::new(format!("task-{}", idx), false, r1, vec![]).with_metadata(Some(
+                serde_json::json!({
+                    "rouge1": r1,
+                    "rouge2": r2,
+                    "rouge_l": r_l,
+                    "reference": reference,
+                    "prediction": prediction,
+                }),
+            )),
+        ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        let rouge1 = raw.get("rouge1").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let rouge2 = raw.get("rouge2").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let rouge_l = raw.get("rouge_l").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total = raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let (total, rouge1_total, rouge2_total, rouge_l_total, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let r1: f64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("rouge1").and_then(|v| v.as_f64()))
+                    .sum();
+                let r2: f64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("rouge2").and_then(|v| v.as_f64()))
+                    .sum();
+                let rl: f64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("rouge_l").and_then(|v| v.as_f64()))
+                    .sum();
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (total, r1, r2, rl, out, think)
+            } else {
+                (
+                    raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("rouge1").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    raw.get("rouge2").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    raw.get("rouge_l").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+
+        let rouge1 = if total > 0 {
+            rouge1_total / total as f64
+        } else {
+            0.0
+        };
+        let rouge2 = if total > 0 {
+            rouge2_total / total as f64
+        } else {
+            0.0
+        };
+        let rouge_l = if total > 0 {
+            rouge_l_total / total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(

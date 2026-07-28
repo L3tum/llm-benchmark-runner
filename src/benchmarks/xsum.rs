@@ -1,13 +1,13 @@
 use crate::benchmarks::Benchmark;
-use crate::client::Client;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit};
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 /// XSum benchmark with ROUGE-based faithfulness proxy.
 ///
@@ -16,9 +16,25 @@ use std::sync::OnceLock;
 /// HuggingFace token and is currently gated, we use ROUGE overlap with the human-written
 /// reference summary as a proxy for faithfulness. A summary that closely matches the faithful
 /// reference is likely faithful. The diagnostic message clarifies this approach.
-pub struct XSumBenchmark;
+pub struct XSumBenchmark {
+    state: Mutex<XSumState>,
+}
 
-static DATASET: OnceLock<Vec<XSumItem>> = OnceLock::new();
+struct XSumState {
+    items: Vec<XSumItem>,
+    current_idx: usize,
+}
+
+impl Default for XSumBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(XSumState {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct XSumItem {
@@ -28,30 +44,28 @@ struct XSumItem {
     narrative_link: String,
 }
 
-fn load_xsum_dataset() -> &'static Vec<XSumItem> {
-    DATASET.get_or_init(|| {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_default()
-            .join("llm-benchmark-runner")
-            .join("xsum");
-        let path = cache_dir.join("XSum.csv");
+fn load_xsum_dataset() -> Vec<XSumItem> {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_default()
+        .join("llm-benchmark-runner")
+        .join("xsum");
+    let path = cache_dir.join("XSum.csv");
 
-        if path.exists() {
-            let content = fs::read_to_string(&path).expect("Failed to read cached XSum");
-            return parse_xsum_csv(&content);
-        }
+    if path.exists() {
+        let content = fs::read_to_string(&path).expect("Failed to read cached XSum");
+        return parse_xsum_csv(&content);
+    }
 
-        fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-        println!("  Downloading XSum dataset...");
-        let url = "https://huggingface.co/datasets/EdinburghNLP/xsum/resolve/main/test.csv";
-        let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-            .expect("Failed to download XSum");
+    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    println!("  Downloading XSum dataset...");
+    let url = "https://huggingface.co/datasets/EdinburghNLP/xsum/resolve/main/test.csv";
+    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+        .expect("Failed to download XSum");
 
-        let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
-        let items = parse_xsum_csv(&content);
-        fs::write(&path, &bytes).expect("Failed to save XSum");
-        items
-    })
+    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
+    let items = parse_xsum_csv(&content);
+    fs::write(&path, &bytes).expect("Failed to save XSum");
+    items
 }
 
 fn parse_xsum_csv(content: &str) -> Vec<XSumItem> {
@@ -87,88 +101,113 @@ impl Benchmark for XSumBenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let _ = load_xsum_dataset();
+        let items = load_xsum_dataset();
+        let mut state = self.state.lock().unwrap();
+        state.items = items;
+        state.current_idx = 0;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let dataset = load_xsum_dataset();
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (item, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            (item, idx)
+        };
 
         let system_prompt =
             "You are a summarisation expert. Given an article, write a single-sentence summary that captures the main point. Do not include any information not present in the article.";
 
-        let user_prompt = r#"Article: {article}
-Summary:"#;
+        let user_prompt = "Article: {article}\nSummary:";
+        let prompt = user_prompt.replace("{article}", &item.document);
 
-        let total = dataset.len();
-        let mut rouge1_score = 0.0;
-        let mut rouge2_score = 0.0;
-        let mut rouge_l_score = 0.0;
-        let mut output_tokens_total: i64 = 0;
-        let mut thinking_tokens_total: i64 = 0;
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
 
-        for item in dataset {
-            let prompt = user_prompt.replace("{article}", &item.document);
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let reference = item.summary.trim();
+        let prediction = response.trim();
+        let (r1, r2, r_l) = compute_rouge_scores(reference, prediction);
 
-            output_tokens_total += output_tokens.unwrap_or(0) as i64;
-            thinking_tokens_total += thinking_tokens.unwrap_or(0) as i64;
-
-            let reference = item.summary.trim();
-            let prediction = response.trim();
-            let (r1, r2, r_l) = compute_rouge_scores(reference, prediction);
-            rouge1_score += r1;
-            rouge2_score += r2;
-            rouge_l_score += r_l;
-        }
-
-        let rouge1 = rouge1_score / total as f64;
-        let rouge2 = rouge2_score / total as f64;
-        let rouge_l = rouge_l_score / total as f64;
-
-        let raw_json = serde_json::json!({
-            "rouge1": rouge1,
-            "rouge2": rouge2,
-            "rouge_l": rouge_l,
-            "total": total,
-            "output_tokens": output_tokens_total,
-            "thinking_tokens": thinking_tokens_total,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!(
-                    "XSum (Faithfulness Proxy): ROUGE-1 {:.1}%, ROUGE-2 {:.1}%, ROUGE-L {:.1}% — overlap with human-annotated faithful reference",
-                    rouge1 * 100.0,
-                    rouge2 * 100.0,
-                    rouge_l * 100.0
-                ),
-            }],
-            raw: raw_json,
-        })
+        Ok(Some(
+            TaskResult::new(format!("task-{}", idx), false, r1, vec![]).with_metadata(Some(
+                serde_json::json!({
+                    "rouge1": r1,
+                    "rouge2": r2,
+                    "rouge_l": r_l,
+                    "reference": reference,
+                    "prediction": prediction,
+                }),
+            )),
+        ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        let rouge1 = raw.get("rouge1").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let rouge2 = raw.get("rouge2").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let rouge_l = raw.get("rouge_l").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total = raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let (total, rouge1_total, rouge2_total, rouge_l_total, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let r1: f64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("rouge1").and_then(|v| v.as_f64()))
+                    .sum();
+                let r2: f64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("rouge2").and_then(|v| v.as_f64()))
+                    .sum();
+                let rl: f64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("rouge_l").and_then(|v| v.as_f64()))
+                    .sum();
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (total, r1, r2, rl, out, think)
+            } else {
+                (
+                    raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("rouge1").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    raw.get("rouge2").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    raw.get("rouge_l").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+
+        let rouge1 = if total > 0 {
+            rouge1_total / total as f64
+        } else {
+            0.0
+        };
+        let rouge2 = if total > 0 {
+            rouge2_total / total as f64
+        } else {
+            0.0
+        };
+        let rouge_l = if total > 0 {
+            rouge_l_total / total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(

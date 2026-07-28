@@ -28,6 +28,7 @@ pub enum BenchmarkCategory {
     Hallucination,
     Translation,
     Safety,
+    ToolUse,
     Other(String),
 }
 
@@ -46,6 +47,7 @@ impl BenchmarkCategory {
             Self::Hallucination => "Hallucination".to_string(),
             Self::Translation => "Translation".to_string(),
             Self::Safety => "Safety".to_string(),
+            Self::ToolUse => "Tool-Use".to_string(),
             Self::Other(s) => s.clone(),
         }
     }
@@ -64,6 +66,7 @@ impl BenchmarkCategory {
             "Hallucination" => Self::Hallucination,
             "Translation" => Self::Translation,
             "Safety" => Self::Safety,
+            "Tool-Use" => Self::ToolUse,
             other => Self::Other(other.to_string()),
         }
     }
@@ -299,6 +302,80 @@ impl BenchmarkResult {
             diagnostics: vec![],
             raw: Value::Null,
         }
+    }
+
+    /// Build a `BenchmarkResult` from a list of per-task results.
+    /// Used by both the runner (execute_one path) and individual benchmarks (execute path).
+    pub fn from_task_results(task_results: Vec<TaskResult>) -> Self {
+        let total = task_results.len() as i64;
+        let passed = task_results.iter().filter(|t| t.passed).count() as i64;
+        let total_output_tokens: u64 = task_results.iter().map(|t| t.output_tokens).sum();
+        let total_thinking_tokens: u64 = task_results.iter().map(|t| t.thinking_tokens).sum();
+
+        Self {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: serde_json::json!({
+                "pass_rate": if total > 0 { passed as f64 / total as f64 } else { 0.0 },
+                "total_tasks": total,
+                "passed_tasks": passed,
+                "output_tokens": total_output_tokens,
+                "thinking_tokens": total_thinking_tokens,
+                "per_task": task_results.iter().map(|t| serde_json::json!({
+                    "task_id": t.task_id,
+                    "passed": t.passed,
+                    "score": t.score,
+                    "categories": t.categories,
+                    "output_tokens": t.output_tokens,
+                    "thinking_tokens": t.thinking_tokens,
+                    "metadata": t.metadata,
+                })).collect::<Vec<_>>(),
+            }),
+        }
+    }
+}
+
+/// Per-task result returned by `Benchmark::execute_one()`.
+/// Token counts are populated by runner.rs from the TokenTracker, not by the benchmark itself.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskResult {
+    pub task_id: String,
+    pub passed: bool,
+    pub score: f64,
+    /// Categories for breakdown tables (e.g., `["data-processing", "easy"]`)
+    pub categories: Vec<String>,
+    /// Populated by runner.rs from TokenTracker delta
+    pub output_tokens: u64,
+    /// Populated by runner.rs from TokenTracker delta
+    pub thinking_tokens: u64,
+    /// Optional per-task extras
+    pub metadata: Option<Value>,
+}
+
+impl TaskResult {
+    pub fn new(
+        task_id: impl Into<String>,
+        passed: bool,
+        score: f64,
+        categories: Vec<String>,
+    ) -> Self {
+        Self {
+            task_id: task_id.into(),
+            passed,
+            score,
+            categories,
+            output_tokens: 0,
+            thinking_tokens: 0,
+            metadata: None,
+        }
+    }
+
+    pub fn with_metadata(mut self, metadata: Option<Value>) -> Self {
+        self.metadata = metadata;
+        self
     }
 }
 

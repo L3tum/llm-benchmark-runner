@@ -1,15 +1,33 @@
 use crate::benchmarks::Benchmark;
-use crate::client::Client;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkResult, Score, ScoreUnit};
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-pub struct IFEvalBenchmark;
+pub struct IFEvalBenchmark {
+    state: Mutex<IFEvalState>,
+}
+
+struct IFEvalState {
+    items: Vec<IFEvalRow>,
+    current_idx: usize,
+}
+
+impl Default for IFEvalBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(IFEvalState {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 const IFEVAL_URL: &str = "https://huggingface.co/datasets/google/IFEval/resolve/main/IFEval.json";
 
@@ -203,65 +221,145 @@ impl Benchmark for IFEvalBenchmark {
         "IFEval"
     }
 
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::InstructionFollowing
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::InstructionFollowing
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let _ = load_ifeval_dataset()?;
+        let dataset = load_ifeval_dataset()?;
+        let mut state = self.state.lock().unwrap();
+        state.items = dataset;
+        state.current_idx = 0;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let dataset = load_ifeval_dataset()?;
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
-
-        let mut total_instructions = 0i64;
-        let mut total_followed = 0i64;
-        let mut instance_results = Vec::new();
-        let mut total_output_tokens = 0i64;
-        let mut total_thinking_tokens = 0i64;
-        let mut skipped_instances = 0i64;
-
-        for row in &dataset {
-            let verifiers = create_verifiers(&row.instruction_ids);
-            if verifiers.is_empty() {
-                skipped_instances += row.instruction_ids.len() as i64;
-                continue;
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (row, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
             }
+            let idx = state.current_idx;
+            let row = state.items[idx].clone();
+            state.current_idx += 1;
+            (row, idx)
+        };
 
-            let prompt = row.prompt.clone();
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, "", &prompt)?;
+        let verifiers = create_verifiers(&row.instruction_ids);
 
-            total_output_tokens += output_tokens.unwrap_or(0) as i64;
-            total_thinking_tokens += thinking_tokens.unwrap_or(0) as i64;
+        // Skip if no verifiers implemented
+        if verifiers.is_empty() {
+            return Ok(Some(
+                TaskResult::new(format!("task-{}", idx), false, 0.0, vec![]).with_metadata(Some(
+                    serde_json::json!({
+                        "skipped": true,
+                        "instruction_ids": row.instruction_ids,
+                        "reason": "no verifier implemented",
+                    }),
+                )),
+            ));
+        }
 
-            let mut instance_followed = 0;
-            let mut instruction_results = Vec::new();
+        let response = tracker.chat_completion(&model.model_name, "", &row.prompt)?;
 
-            for verifier in verifiers {
-                let passed = (verifier.check_fn)(&response);
-                total_instructions += 1;
-                if passed {
-                    total_followed += 1;
-                    instance_followed += 1;
-                }
-                instruction_results.push(serde_json::json!({
-                    "instruction_id": verifier.id,
-                    "passed": passed,
-                }));
+        let mut followed = 0;
+        let mut total = 0;
+        let mut instruction_results = Vec::new();
+
+        for verifier in verifiers {
+            let passed = (verifier.check_fn)(&response);
+            total += 1;
+            if passed {
+                followed += 1;
             }
-
-            instance_results.push(serde_json::json!({
-                "instance_id": row.instruction_ids.join("_"),
-                "instructions_total": row.instruction_ids.len(),
-                "instructions_followed": instance_followed,
-                "instruction_results": instruction_results,
-                "output_tokens": output_tokens,
-                "thinking_tokens": thinking_tokens,
+            instruction_results.push(serde_json::json!({
+                "instruction_id": verifier.id,
+                "passed": passed,
             }));
         }
+
+        let all_followed = followed == total;
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                all_followed,
+                followed as f64 / total as f64,
+                row.instruction_ids.clone(),
+            )
+            .with_metadata(Some(serde_json::json!({
+                "instruction_followed": followed,
+                "instruction_total": total,
+                "instruction_results": instruction_results,
+            }))),
+        ))
+    }
+
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
+
+        let (total_instructions, total_followed, skipped, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let mut total = 0i64;
+                let mut followed = 0i64;
+                let mut skipped_count = 0i64;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+
+                for task in per_task {
+                    if task
+                        .get("skipped")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        if let Some(ids) = task.get("instruction_ids").and_then(|v| v.as_array()) {
+                            skipped_count += ids.len() as i64;
+                        }
+                    } else if let Some(meta) = task.get("metadata").and_then(|v| v.as_object()) {
+                        let inst_total = meta
+                            .get("instruction_total")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let inst_followed = meta
+                            .get("instruction_followed")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        total += inst_total;
+                        followed += inst_followed;
+                    }
+                }
+                (total, followed, skipped_count, out, think)
+            } else {
+                (
+                    raw.get("total_instructions")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("total_followed")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("skipped_instructions")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
 
         let follow_rate = if total_instructions == 0 {
             0.0
@@ -269,64 +367,10 @@ impl Benchmark for IFEvalBenchmark {
             total_followed as f64 / total_instructions as f64
         };
 
-        // Build raw JSON
-        let raw_json = serde_json::json!({
-            "instruction_following_rate": follow_rate,
-            "total_instructions": total_instructions,
-            "total_followed": total_followed,
-            "skipped_instructions": skipped_instances,
-            "output_tokens": total_output_tokens,
-            "thinking_tokens": total_thinking_tokens,
-            "instance_results": instance_results,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!(
-                    "IFEval: {}/{} instructions followed ({:.1}%). {} instructions were skipped (no verifier implemented).",
-                    total_followed, total_instructions, follow_rate * 100.0, skipped_instances
-                ),
-            }],
-            raw: raw_json,
-        })
-    }
-
-    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let raw = &b.raw;
-        let follow_rate = raw
-            .get("instruction_following_rate")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let total_instructions = raw
-            .get("total_instructions")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let total_followed = raw
-            .get("total_followed")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let skipped = raw
-            .get("skipped_instructions")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
         let mut scores = BTreeMap::new();
         scores.insert(
             "instruction_following_rate".to_string(),
-            Score::float(follow_rate, ScoreUnit::Percent)
+            Score::float(follow_rate * 100.0, ScoreUnit::Percent)
                 .primary(true)
                 .higher_is_better(true),
         );

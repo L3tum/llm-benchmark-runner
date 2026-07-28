@@ -6,6 +6,15 @@ pub struct LogprobEntry {
     pub token: String,
     pub logprob: f64,
 }
+
+/// A structured tool call from a chat completion response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: Message,
@@ -19,6 +28,21 @@ struct Message {
     thinking_content: Option<String>,
     #[serde(default)]
     thinking: Option<serde_json::Value>,
+    #[serde(default, rename = "tool_calls")]
+    tool_calls: Option<Vec<ToolCallResponse>>,
+}
+#[derive(Debug, Deserialize)]
+struct ToolCallResponse {
+    id: String,
+    #[serde(default)]
+    function: FunctionCall,
+}
+#[derive(Debug, Default, Deserialize)]
+struct FunctionCall {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    arguments: String, // JSON string
 }
 #[derive(Debug, Deserialize)]
 struct Logprobs {
@@ -54,6 +78,9 @@ pub struct Client {
     base_url: reqwest::Url,
     http: reqwest::blocking::Client,
     model_params: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Accumulated conversation history for multi-turn tool-use sessions.
+    /// Each entry is a message JSON object (role + content + optional tool_calls).
+    history: Vec<serde_json::Value>,
 }
 
 fn rough_token_count(text: &str) -> u64 {
@@ -117,6 +144,7 @@ impl Client {
             base_url,
             http,
             model_params,
+            history: Vec::new(),
         })
     }
 
@@ -225,5 +253,137 @@ impl Client {
             }
         }
         Err(anyhow::anyhow!("No logprobs"))
+    }
+
+    /// Chat completion with structured tool calling and optional conversation history.
+    ///
+    /// - `use_history = true`: On the first call, pushes system + user into accumulated
+    ///   history. On subsequent calls, pushes only the new user message. After the API
+    ///   response, the assistant message is appended to history. Use `append_tool_result()`
+    ///   to feed back tool outputs for subsequent turns.
+    /// - `use_history = false`: Clear any accumulated history before sending this request
+    ///   (fire-and-forget, no state carried forward).
+    ///
+    /// Returns (text_content, tool_calls, output_tokens, thinking_tokens).
+    #[allow(clippy::type_complexity)]
+    pub fn chat_completion_with_tools(
+        &mut self,
+        model_name: &str,
+        system: &str,
+        user: &str,
+        tools: Vec<serde_json::Value>,
+        model_params: Option<&HashMap<String, serde_json::Value>>,
+        use_history: bool,
+    ) -> Result<(String, Vec<ToolCall>, Option<u64>, Option<u64>)> {
+        // If history is disabled, clear any accumulated state
+        if !use_history {
+            self.history.clear();
+        }
+
+        let url = self.base_url.join("chat/completions")?;
+
+        // Build messages array from accumulated history
+        // On first call: push system + user; on subsequent calls: push only user
+        let len = self.history.len();
+        if len == 0 {
+            self.history
+                .push(serde_json::json!({"role": "system", "content": system}));
+        }
+        self.history
+            .push(serde_json::json!({"role": "user", "content": user}));
+        let messages: Vec<serde_json::Value> = self.history.clone();
+
+        let mut req = serde_json::json!({
+            "model": model_name,
+            "max_tokens": 16_000,
+            "messages": messages,
+            "tools": tools,
+        });
+        // Merge model params last so they take final precedence
+        if let Some(params) = &self.model_params {
+            if let Some(req_obj) = req.as_object_mut() {
+                for (k, v) in params {
+                    req_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        // Override with caller-provided model params
+        if let Some(params) = model_params {
+            if let Some(req_obj) = req.as_object_mut() {
+                for (k, v) in params {
+                    req_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        let resp = self.http.post(url).json(&req).send()?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!("API error: {}", resp.status()));
+        }
+        let response: ChatResponse = resp.json()?;
+        if response.choices.is_empty() {
+            return Err(anyhow::anyhow!("Empty response"));
+        }
+
+        let message = &response.choices[0].message;
+        let text = message.content.clone().unwrap_or_default();
+        let (output_tokens, thinking_tokens) = token_usage_from_response(&response, message);
+
+        // Parse tool calls from response
+        let tool_calls = message
+            .tool_calls
+            .as_ref()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|tc| {
+                        let args: serde_json::Value =
+                            serde_json::from_str(&tc.function.arguments).ok()?;
+                        Some(ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            arguments: args,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // If history is enabled, append the assistant message to history
+        if use_history {
+            let mut assistant_msg = serde_json::json!({"role": "assistant", "content": text});
+            if let Some(calls) = &message.tool_calls {
+                let tc_json: Vec<serde_json::Value> = calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }
+                        })
+                    })
+                    .collect();
+                assistant_msg["tool_calls"] = serde_json::Value::Array(tc_json);
+            }
+            self.history.push(assistant_msg);
+        }
+
+        Ok((text, tool_calls, output_tokens, thinking_tokens))
+    }
+
+    /// Append a tool result to the conversation history.
+    /// Call this after executing a tool to feed the result back to the model.
+    pub fn append_tool_result(&mut self, tool_call_id: &str, content: &str) {
+        self.history.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }));
+    }
+
+    /// Clear accumulated conversation history.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
 }

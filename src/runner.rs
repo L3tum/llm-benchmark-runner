@@ -1,7 +1,8 @@
 use crate::benchmarks;
 use crate::client::Client;
 use crate::config::{self, DockerConfig, Model};
-use crate::reports::model::{BenchmarkResult, Diagnostic};
+use crate::reports::model::{BenchmarkResult, Diagnostic, TaskResult};
+use crate::token_tracker::TokenTracker;
 use crate::utils::format_duration;
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -62,7 +63,8 @@ pub fn run_model(
 
         if wait_for_health(&client) {
             println!("  Proxy healthy before {}.", bench_name);
-            match benchmarks::execute_benchmark(bench_name, model, &bench_cfg) {
+            // Try execute_one first; fall back to execute if not supported
+            match run_benchmark(bench_name, model, &bench_cfg) {
                 Ok(result) => {
                     model_results.insert(bench_name.to_string(), result);
                     new_successful.push(bench_name.to_string());
@@ -199,6 +201,47 @@ impl Drop for ModelProcessGuard {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Runs a single benchmark via `execute_one`.
+///
+/// Creates a `TokenTracker` and passes it to each `execute_one` call. After each task,
+/// takes a snapshot of the tracker to compute the per-task token delta and annotates
+/// the `TaskResult` with those counts.
+fn run_benchmark(
+    bench_name: &str,
+    model: &Model,
+    bench_cfg: &yaml_serde::Value,
+) -> Result<BenchmarkResult> {
+    // Create tracker for this benchmark run
+    let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
+    let mut tracker = TokenTracker::new(client);
+
+    let mut task_results: Vec<TaskResult> = Vec::new();
+
+    loop {
+        // Snapshot before the task
+        let (prev_output, prev_thinking) = tracker.snapshot();
+
+        match benchmarks::execute_benchmark_one(bench_name, model, bench_cfg, &mut tracker) {
+            Ok(Some(mut task_result)) => {
+                // Annotate with per-task token delta from tracker
+                let (curr_output, curr_thinking) = tracker.snapshot();
+                task_result.output_tokens = curr_output - prev_output;
+                task_result.thinking_tokens = curr_thinking - prev_thinking;
+                task_results.push(task_result);
+            }
+            Ok(None) => {
+                // All tasks done
+                break;
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(BenchmarkResult::from_task_results(task_results))
 }
 
 pub fn wait_for_health(client: &Client) -> bool {

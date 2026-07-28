@@ -2,7 +2,7 @@
 
 A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it.
 
-Supports **MMLU-Pro**, **GPQA Diamond**, **AIME 2025/2026**, **MATH-500**, **Coding Eval** (HumanEval+, MBPP+), **SWE-Bench**, **KLD divergence**, **Minebench**, **IFEval**, **HarmBench**, and more.
+Supports **MMLU-Pro**, **GPQA Diamond**, **AIME 2025/2026**, **MATH-500**, **Coding Eval** (HumanEval+, MBPP+), **SWE-Bench**, **KLD divergence**, **Minebench**, **IFEval**, **HarmBench**, **TerminalBench 2.1**, **StableToolBench**, and more.
 
 ## Quick Start
 
@@ -372,7 +372,23 @@ Predictions are saved under `benchmark_results/swe_bench_runs/...`. Runs can be 
 
 **Config options:** `num_samples`, `split` (e.g., `test`), `timeout_secs` (per-task timeout), `token_env` (env var for API key), `dataset_id` (HuggingFace dataset for pro version).
 
-### Legacy: `coding_eval` (umbrella)
+### TerminalBench 2.1 (`terminal_bench`)
+
+Docker-backed **agentic terminal** benchmark. Each task provides a Linux shell environment with an instruction (e.g., "find all files containing a pattern", "debug a failing script"). The model acts as a terminal agent, executing shell commands iteratively via structured tool calls until the task is complete. Tasks are validated by running the repository's test suite inside the container.
+
+Dataset downloaded from `harbor-framework/terminal-bench-2-1` on GitHub and cached locally.
+
+**Config options:** `num_samples` (89 total), `max_iterations` (max tool-call turns per task, default 50), `timeout_secs` (per-task timeout, default 900), `categories` (filter by category: `file_management`, `shell_commands`, `debugging`, `programming`, `data_processing`, `linux`, `other`).
+
+### StableToolBench (`stable_toolbench`)
+
+Evaluates **tool/API selection and parameter completion** from the THUNLP-MT/StableToolBench dataset. Each instance presents a natural-language query along with a catalog of available APIs. The model is expected to select the correct tool(s) and provide appropriate parameters via structured function calling. Metrics include simulated pass rate, tool selection accuracy, API precision/recall/F1, and parameter completeness.
+
+Dataset downloaded directly from `THUNLP-MT/StableToolBench/solvable_queries/` on GitHub (~1.2K instances across 6 subsets: G1_instruction, G1_category, G1_tool, G2_category, G2_instruction, G3_instruction).
+
+**Config options:** `num_samples`, `subsets` (comma-separated subset names), `categories` (filter by domain).
+
+## Legacy: `coding_eval` (umbrella)
 
 Backwards-compatible config shape. If you list `coding_eval` in your `benchmarks` and configure a `tasksets` under `benchmark.coding_eval`, it will run the specified coding benchmarks. Prefer using the explicit benchmark names above.
 

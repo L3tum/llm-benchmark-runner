@@ -132,3 +132,167 @@ pub fn attach_docker_config(
         other => other,
     }
 }
+
+// Helper functions for extracting values from benchmark config
+pub fn extract_usize(config: &yaml_serde::Value, key: &str) -> Option<usize> {
+    if let yaml_serde::Value::Mapping(map) = config {
+        if let Some(val) = map.get(yaml_serde::Value::String(key.to_string())) {
+            return val.as_f64().map(|v| v as usize);
+        }
+    }
+    None
+}
+
+pub fn extract_u64(config: &yaml_serde::Value, key: &str) -> Option<u64> {
+    if let yaml_serde::Value::Mapping(map) = config {
+        if let Some(val) = map.get(yaml_serde::Value::String(key.to_string())) {
+            return val.as_f64().map(|v| v as u64);
+        }
+    }
+    None
+}
+
+pub fn extract_string(config: &yaml_serde::Value, key: &str) -> Option<String> {
+    if let yaml_serde::Value::Mapping(map) = config {
+        if let Some(yaml_serde::Value::String(s)) =
+            map.get(yaml_serde::Value::String(key.to_string()))
+        {
+            return Some(s.clone());
+        }
+    }
+    None
+}
+
+pub fn extract_string_vec(config: &yaml_serde::Value, key: &str) -> Option<Vec<String>> {
+    if let yaml_serde::Value::Mapping(map) = config {
+        if let Some(val) = map.get(yaml_serde::Value::String(key.to_string())) {
+            // Try as sequence first
+            if let yaml_serde::Value::Sequence(arr) = val {
+                return Some(
+                    arr.iter()
+                        .filter_map(|v| {
+                            if let yaml_serde::Value::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            // Try as comma-separated string
+            if let yaml_serde::Value::String(s) = val {
+                if s.is_empty() {
+                    return None;
+                }
+                return Some(s.split(',').map(|s| s.trim().to_string()).collect());
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_bool(config: &yaml_serde::Value, key: &str) -> Option<bool> {
+    if let yaml_serde::Value::Mapping(map) = config {
+        if let Some(val) = map.get(yaml_serde::Value::String(key.to_string())) {
+            // yaml_serde may represent booleans as strings
+            if let yaml_serde::Value::String(s) = val {
+                return Some(s == "true" || s == "yes");
+            }
+            // Try number
+            if let Some(n) = val.as_f64() {
+                return Some(n != 0.0);
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_docker_config(config: &yaml_serde::Value) -> DockerConfig {
+    if let yaml_serde::Value::Mapping(map) = config {
+        if let Some(docker_val) = map.get(yaml_serde::Value::String("__docker".to_string())) {
+            if let Ok(dc) = yaml_serde::from_value(docker_val.clone()) {
+                return dc;
+            }
+        }
+    }
+    DockerConfig::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(pairs: Vec<(&str, serde_json::Value)>) -> yaml_serde::Value {
+        let json: serde_json::Map<String, serde_json::Value> =
+            pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        yaml_serde::from_value(yaml_serde::to_value(json).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn extract_usize_from_number() {
+        let cfg = make_config(vec![("n", serde_json::json!(42))]);
+        assert_eq!(extract_usize(&cfg, "n"), Some(42));
+    }
+
+    #[test]
+    fn extract_usize_missing_key() {
+        let cfg = make_config(vec![]);
+        assert_eq!(extract_usize(&cfg, "missing"), None);
+    }
+
+    #[test]
+    fn extract_string_from_string() {
+        let cfg = make_config(vec![("name", serde_json::json!("hello"))]);
+        assert_eq!(extract_string(&cfg, "name"), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn extract_string_vec_from_sequence() {
+        let cfg = make_config(vec![("tags", serde_json::json!(["a", "b"]))]);
+        assert_eq!(
+            extract_string_vec(&cfg, "tags"),
+            Some(vec!["a".into(), "b".into()])
+        );
+    }
+
+    #[test]
+    fn extract_string_vec_from_csv() {
+        let cfg = make_config(vec![("tags", serde_json::json!("x, y, z"))]);
+        assert_eq!(
+            extract_string_vec(&cfg, "tags"),
+            Some(vec!["x".into(), "y".into(), "z".into()])
+        );
+    }
+
+    #[test]
+    fn extract_bool_true() {
+        let cfg = make_config(vec![("on", serde_json::json!("true"))]);
+        assert_eq!(extract_bool(&cfg, "on"), Some(true));
+    }
+
+    #[test]
+    fn extract_bool_false() {
+        let cfg = make_config(vec![("off", serde_json::json!("false"))]);
+        assert_eq!(extract_bool(&cfg, "off"), Some(false));
+    }
+
+    #[test]
+    fn extract_bool_from_number() {
+        let cfg = make_config(vec![("n", serde_json::json!(1))]);
+        assert_eq!(extract_bool(&cfg, "n"), Some(true));
+    }
+
+    #[test]
+    fn extract_u64_from_number() {
+        let cfg = make_config(vec![("timeout", serde_json::json!(900))]);
+        assert_eq!(extract_u64(&cfg, "timeout"), Some(900));
+    }
+
+    #[test]
+    fn extract_docker_config_defaults() {
+        let cfg = yaml_serde::Value::Null;
+        let dc = extract_docker_config(&cfg);
+        assert!(dc.enabled);
+    }
+}

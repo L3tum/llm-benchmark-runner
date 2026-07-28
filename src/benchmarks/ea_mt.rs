@@ -1,17 +1,33 @@
 use crate::benchmarks::Benchmark;
-use crate::client::Client;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit};
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
-pub struct EAMTBenchmark;
+pub struct EAMTBenchmark {
+    state: Mutex<EAMTState>,
+}
 
-static DATASET: OnceLock<Vec<EAItem>> = OnceLock::new();
+struct EAMTState {
+    items: Vec<EAItem>,
+    current_idx: usize,
+}
+
+impl Default for EAMTBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(EAMTState {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct EAItem {
@@ -31,31 +47,28 @@ struct Entity {
     translation: Vec<String>,
 }
 
-fn load_eamt_dataset() -> &'static Vec<EAItem> {
-    DATASET.get_or_init(|| {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_default()
-            .join("llm-benchmark-runner")
-            .join("ea_mt");
-        let path = cache_dir.join("ea-mt-benchmark.json");
+fn load_eamt_dataset() -> Vec<EAItem> {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_default()
+        .join("llm-benchmark-runner")
+        .join("ea_mt");
+    let path = cache_dir.join("ea-mt-benchmark.json");
 
-        if path.exists() {
-            let content = fs::read_to_string(&path).expect("Failed to read cached EA-MT");
-            let parsed: EAMTDataset =
-                serde_json::from_str(&content).expect("Failed to parse EA-MT");
-            return parsed.data;
-        }
+    if path.exists() {
+        let content = fs::read_to_string(&path).expect("Failed to read cached EA-MT");
+        let parsed: EAMTDataset = serde_json::from_str(&content).expect("Failed to parse EA-MT");
+        return parsed.data;
+    }
 
-        fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-        println!("  Downloading EA-MT (Entity-Aware Machine Translation) dataset...");
-        let url = "https://huggingface.co/datasets/sapienzanlp/ea-mt-benchmark/resolve/main/ea-mt-benchmark.json";
-        let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-            .expect("Failed to download EA-MT");
+    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    println!("  Downloading EA-MT (Entity-Aware Machine Translation) dataset...");
+    let url = "https://huggingface.co/datasets/sapienzanlp/ea-mt-benchmark/resolve/main/ea-mt-benchmark.json";
+    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+        .expect("Failed to download EA-MT");
 
-        let parsed: EAMTDataset = serde_json::from_slice(&bytes).expect("Failed to parse EA-MT");
-        fs::write(&path, &bytes).expect("Failed to save EA-MT");
-        parsed.data
-    })
+    let parsed: EAMTDataset = serde_json::from_slice(&bytes).expect("Failed to parse EA-MT");
+    fs::write(&path, &bytes).expect("Failed to save EA-MT");
+    parsed.data
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,128 +90,122 @@ impl Benchmark for EAMTBenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let _ = load_eamt_dataset();
+        let items = load_eamt_dataset();
+        let mut state = self.state.lock().unwrap();
+        state.items = items;
+        state.current_idx = 0;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let dataset = load_eamt_dataset();
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
-
-        let system_prompt = "You are a translation expert. Translate the given sentence into the target language. Pay special attention to named entities — translate them correctly if appropriate.";
-
-        let user_prompt = r#"Translate from {source_language} to {target_language}:
-
-Source: {sentence}
-Translation:"#;
-
-        let total = dataset.len();
-        let mut exact_match = 0;
-        let mut output_tokens_total: i64 = 0;
-        let mut thinking_tokens_total: i64 = 0;
-        let mut lang_pair_stats: BTreeMap<String, Vec<bool>> = BTreeMap::new();
-
-        for item in dataset {
-            let lang_pair = format!("{}-{}", item.source_language, item.target_language);
-            let prompt = user_prompt
-                .replace("{source_language}", &item.source_language)
-                .replace("{target_language}", &item.target_language)
-                .replace("{sentence}", &item.sentence);
-
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, system_prompt, &prompt)?;
-
-            output_tokens_total += output_tokens.unwrap_or(0) as i64;
-            thinking_tokens_total += thinking_tokens.unwrap_or(0) as i64;
-
-            let response = response.trim().to_lowercase();
-            let reference = item.target.trim().to_lowercase();
-
-            let full_match = response == reference;
-            if full_match {
-                exact_match += 1;
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (item, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
             }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            (item, idx)
+        };
 
-            lang_pair_stats
-                .entry(lang_pair)
-                .or_default()
-                .push(full_match);
-        }
+        let system_prompt =
+            "You are a translation expert. Translate the given sentence into the target language. Pay special attention to named entities — translate them correctly if appropriate.";
 
-        let accuracy = exact_match as f64 / total as f64;
+        let user_prompt = "Translate from {source_language} to {target_language}:\n\nSource: {sentence}\nTranslation:";
+        let prompt = user_prompt
+            .replace("{source_language}", &item.source_language)
+            .replace("{target_language}", &item.target_language)
+            .replace("{sentence}", &item.sentence);
 
-        // Language pair breakdown
-        let mut breakdowns = BTreeMap::new();
-        for (pair, results) in lang_pair_stats {
-            let correct_count: i64 = results.iter().filter(|&&c| c).count() as i64;
-            let total_count = results.len() as i64;
-            let pair_str = pair.clone();
-            breakdowns.insert(
-                pair_str.clone(),
-                crate::reports::model::BreakdownTable {
-                    title: pair_str,
-                    rows: BTreeMap::from_iter([
-                        (
-                            "accuracy".to_string(),
-                            BTreeMap::from_iter([(
-                                "accuracy".to_string(),
-                                Score::float(
-                                    correct_count as f64 / total_count as f64 * 100.0,
-                                    ScoreUnit::Percent,
-                                ),
-                            )]),
-                        ),
-                        (
-                            "count".to_string(),
-                            BTreeMap::from_iter([(
-                                "total".to_string(),
-                                Score::integer(total_count, ScoreUnit::Count),
-                            )]),
-                        ),
-                    ]),
-                },
-            );
-        }
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
 
-        let raw_json = serde_json::json!({
-            "accuracy": accuracy,
-            "total": total,
-            "correct": exact_match,
-            "output_tokens": output_tokens_total,
-            "thinking_tokens": thinking_tokens_total,
-        });
+        let response = response.trim().to_lowercase();
+        let reference = item.target.trim().to_lowercase();
+        let is_correct = response == reference;
 
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns,
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!(
-                    "EA-MT: {}/{} correct ({:.1}%)",
-                    exact_match,
-                    total,
-                    accuracy * 100.0
-                ),
-            }],
-            raw: raw_json,
-        })
+        let lang_pair = format!("{}-{}", item.source_language, item.target_language);
+        let categories = vec![lang_pair];
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                is_correct,
+                if is_correct { 1.0 } else { 0.0 },
+                categories,
+            )
+            .with_metadata(Some(serde_json::json!({
+                "sentence_id": item.sentence_id,
+                "reference": item.target,
+                "response": response,
+            }))),
+        ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total = raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
-        let correct = raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let (total, correct, output_tokens, thinking_tokens, pair_stats) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let correct = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+
+                let mut pair_stats: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+                for task in per_task {
+                    if let Some(pair) = task
+                        .get("categories")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| v.as_str())
+                    {
+                        let (p, t) = pair_stats.entry(pair.to_string()).or_insert((0, 0));
+                        *t += 1;
+                        if task
+                            .get("passed")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            *p += 1;
+                        }
+                    }
+                }
+                (total, correct, out, think, pair_stats)
+            } else {
+                (
+                    raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    BTreeMap::new(),
+                )
+            }
+        };
+
+        let accuracy = if total > 0 {
+            correct as f64 / total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(
@@ -225,9 +232,44 @@ Translation:"#;
             );
         }
 
+        // Language pair breakdown
+        let mut breakdowns = BTreeMap::new();
+        if !pair_stats.is_empty() {
+            let mut rows = BTreeMap::new();
+            for (pair, (pair_correct, pair_total)) in &pair_stats {
+                let rate = if *pair_total > 0 {
+                    *pair_correct as f64 / *pair_total as f64
+                } else {
+                    0.0
+                };
+                rows.insert(
+                    pair.clone(),
+                    BTreeMap::from([
+                        (
+                            "accuracy".to_string(),
+                            Score::float(rate * 100.0, ScoreUnit::Percent)
+                                .display(format!("{:.1}%", rate * 100.0)),
+                        ),
+                        (
+                            "instances".to_string(),
+                            Score::integer(*pair_total, ScoreUnit::Count)
+                                .display(format!("{}/{}", pair_correct, pair_total)),
+                        ),
+                    ]),
+                );
+            }
+            breakdowns.insert(
+                "By Language Pair".to_string(),
+                crate::reports::model::BreakdownTable {
+                    title: "Accuracy by Language Pair".to_string(),
+                    rows,
+                },
+            );
+        }
+
         Ok(BenchmarkResult {
             scores,
-            breakdowns: b.breakdowns.clone(),
+            breakdowns,
             error_classification: BTreeMap::new(),
             artifacts: vec![],
             diagnostics: vec![crate::reports::model::Diagnostic {

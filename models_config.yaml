@@ -35,6 +35,9 @@ benchmarks:
   # Repository patch benchmarks:
   # - swebench_verified
   # - swebench_pro
+  # Tool-use benchmarks:
+  # - terminal_bench
+  # - stable_toolbench
 
 # Shared runtime settings for benchmarks that execute generated code/tests in Docker.
 # build_images auto-builds missing local benchmark images, including the SWE-Bench harness.
@@ -86,6 +89,17 @@ benchmark:
     timeout_secs: 1800
     token_env: HF_TOKEN
     # dataset_id: SWE-bench/SWE-bench_Pro
+  terminal_bench:
+    # Agentic terminal benchmark — Docker sandbox, shell tool calls.
+    num_samples: 5
+    max_iterations: 50
+    timeout_secs: 900
+    # categories: file_management,shell_commands,debugging,programming,data_processing,linux,other
+  stable_toolbench:
+    # Tool/API selection and parameter evaluation.
+    num_samples: 50
+    # subsets: G1_instruction,G1_category,G1_tool,G2_category,G2_instruction,G3_instruction
+    # categories: finance,health,shopping,...
   carwash:
     # Simple common-sense reasoning sanity check. No config options needed.
     # Just runs a single "drive vs walk to car wash" prompt and checks the answer.

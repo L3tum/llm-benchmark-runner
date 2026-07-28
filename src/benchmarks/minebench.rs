@@ -1,12 +1,34 @@
-use crate::client::Client;
+use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::reports::model::BenchmarkResult;
+use crate::reports::model::{
+    Artifact, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult,
+};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
-pub struct MinebenchBenchmark;
+pub struct MinebenchBenchmark {
+    state: Mutex<MinebenchState>,
+}
+
+struct MinebenchState {
+    buildings: Vec<(String, String)>, // (key, build description)
+    current_idx: usize,
+}
+
+impl Default for MinebenchBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(MinebenchState {
+                buildings: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 const DEFAULT_BUILDING_KEY: &str = "castle";
 const DEFAULT_BUILD: &str = "A medieval castle with four corner towers connected by walls, a central keep three stories tall, a gatehouse with a raised portcullis, and a water-filled moat surrounding it";
@@ -243,7 +265,7 @@ Remember:
 - Output ONLY the JSON object.
 "#;
 
-impl super::Benchmark for MinebenchBenchmark {
+impl Benchmark for MinebenchBenchmark {
     fn name(&self) -> &str {
         "minebench"
     }
@@ -252,39 +274,117 @@ impl super::Benchmark for MinebenchBenchmark {
         "Minebench"
     }
 
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::Creative
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::Creative
+    }
+
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
+        let buildings = configured_buildings(config)?;
+        let mut state = self.state.lock().unwrap();
+        state.buildings = buildings;
+        state.current_idx = 0;
+        Ok(())
+    }
+
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (idx, building_key, build) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.buildings.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let (building_key, build) = state.buildings[idx].clone();
+            state.current_idx += 1;
+            (idx, building_key, build)
+        };
+
+        let prompt = MINEBENCH_PROMPT_TEMPLATE.replace("{build}", &build);
+        let response = tracker.chat_completion(&model.model_name, "", &prompt)?;
+
+        let json_output = extract_json_response(&response);
+        let validation_error = match serde_json::from_str::<serde_json::Value>(&json_output) {
+            Ok(_) => None,
+            Err(err) => Some(err.to_string()),
+        };
+        let json_valid = validation_error.is_none();
+
+        let output_file = format!(
+            "output/{}-minebench-{}.json",
+            sanitize_filename(&model.display_name),
+            sanitize_filename(&building_key)
+        );
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                json_valid,
+                if json_valid { 1.0 } else { 0.0 },
+                vec![building_key.clone()],
+            )
+            .with_metadata(Some(serde_json::json!({
+                "building": building_key,
+                "build": build,
+                "json_valid": json_valid,
+                "validation_error": validation_error,
+                "output_file": output_file,
+                "json_output": json_output,
+                "raw_response": response,
+            }))),
+        ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        use crate::reports::model::{Artifact, Score, ScoreUnit};
 
-        let json_valid = raw
-            .get("json_valid")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let valid_buildings = raw
-            .get("valid_buildings")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let total_buildings = raw
-            .get("total_buildings")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(1);
-        let output_file = raw
-            .get("output_file")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let (total_buildings, valid_buildings, output_tokens, thinking_tokens, output_files) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let valid = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let files: Vec<String> = per_task
+                    .iter()
+                    .filter_map(|t| {
+                        t.get("output_file")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .collect();
+                (total, valid, out, think, files)
+            } else {
+                (
+                    raw.get("total_buildings")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(1),
+                    raw.get("valid_buildings")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    vec![],
+                )
+            }
+        };
+
+        let json_valid = total_buildings == valid_buildings;
 
         let mut scores = BTreeMap::new();
         scores.insert(
@@ -312,15 +412,15 @@ impl super::Benchmark for MinebenchBenchmark {
             );
         }
 
-        let artifacts = if !output_file.is_empty() {
-            vec![Artifact {
+        let artifacts: Vec<Artifact> = output_files
+            .into_iter()
+            .filter(|f| !f.is_empty())
+            .map(|path| Artifact {
                 label: "Output".to_string(),
-                path: output_file,
+                path,
                 kind: "file".to_string(),
-            }]
-        } else {
-            vec![]
-        };
+            })
+            .collect();
 
         Ok(BenchmarkResult {
             scores,
@@ -329,91 +429,6 @@ impl super::Benchmark for MinebenchBenchmark {
             artifacts,
             diagnostics: vec![],
             raw: raw.clone(),
-        })
-    }
-
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
-        let buildings = configured_buildings(config)?;
-
-        println!(
-            "\nEvaluating Minebench voxel prompts: {}",
-            buildings
-                .iter()
-                .map(|(key, _)| key.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-
-        let mut building_results = serde_json::Map::new();
-        let mut valid_buildings = 0usize;
-        let mut total_output_tokens: u64 = 0;
-        let mut total_thinking_tokens: u64 = 0;
-
-        for (building_key, build) in buildings {
-            let prompt = MINEBENCH_PROMPT_TEMPLATE.replace("{build}", &build);
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, "", &prompt)?;
-            total_output_tokens += output_tokens.unwrap_or(0);
-            total_thinking_tokens += thinking_tokens.unwrap_or(0);
-
-            let json_output = extract_json_response(&response);
-            let validation_error = match serde_json::from_str::<serde_json::Value>(&json_output) {
-                Ok(_) => None,
-                Err(err) => Some(err.to_string()),
-            };
-            let json_valid = validation_error.is_none();
-            if json_valid {
-                valid_buildings += 1;
-            }
-
-            let output_file = format!(
-                "output/{}-minebench-{}.json",
-                sanitize_filename(&model.display_name),
-                sanitize_filename(&building_key)
-            );
-
-            building_results.insert(
-                building_key.clone(),
-                serde_json::json!({
-                    "building": building_key,
-                    "build": build,
-                    "json_valid": json_valid,
-                    "validation_error": validation_error,
-                    "output_tokens": output_tokens,
-                    "thinking_tokens": thinking_tokens,
-                    "output_file": output_file,
-                    "json_output": json_output,
-                    "raw_response": response,
-                }),
-            );
-        }
-
-        let total_buildings = building_results.len();
-        let json_valid = total_buildings == valid_buildings;
-        let output_files = building_results
-            .values()
-            .filter_map(|v| v.get("output_file").and_then(|f| f.as_str()))
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-
-        let raw_json = serde_json::json!({
-            "json_valid": json_valid,
-            "valid_buildings": valid_buildings,
-            "total_buildings": total_buildings,
-            "output_tokens": total_output_tokens,
-            "thinking_tokens": total_thinking_tokens,
-            "output_files": output_files,
-            "buildings": serde_json::Value::Object(building_results),
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw_json,
         })
     }
 
@@ -426,14 +441,18 @@ impl super::Benchmark for MinebenchBenchmark {
 
         for (model_name, b) in model_results {
             let raw = &b.raw;
-            let Some(minebench) = raw.get("minebench") else {
-                continue;
-            };
-
-            let mut model_outputs = serde_json::Map::new();
-            if let Some(buildings) = minebench.get("buildings").and_then(|v| v.as_object()) {
-                for (building_key, result) in buildings {
-                    let output_file = result
+            // Try the new per_task format first
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let mut model_outputs = serde_json::Map::new();
+                for task in per_task {
+                    let building_key = task
+                        .get("categories")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let output_file = task
                         .get("output_file")
                         .and_then(|v| v.as_str())
                         .map(ToOwned::to_owned)
@@ -441,13 +460,13 @@ impl super::Benchmark for MinebenchBenchmark {
                             format!(
                                 "output/{}-minebench-{}.json",
                                 sanitize_filename(model_name),
-                                sanitize_filename(building_key)
+                                sanitize_filename(&building_key)
                             )
                         });
-                    let json_output = result
+                    let json_output = task
                         .get("json_output")
                         .and_then(|v| v.as_str())
-                        .or_else(|| result.get("raw_response").and_then(|v| v.as_str()))
+                        .or_else(|| task.get("raw_response").and_then(|v| v.as_str()))
                         .unwrap_or("");
 
                     if let Some(parent) = Path::new(&output_file).parent() {
@@ -459,32 +478,41 @@ impl super::Benchmark for MinebenchBenchmark {
                         serde_json::json!({ "output_file": output_file }),
                     );
                 }
-            } else {
-                // Backward-compatible writer for old single-building result files.
-                let output_file = minebench
-                    .get("output_file")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| {
-                        format!("output/{}-minebench.json", sanitize_filename(model_name))
-                    });
-                let json_output = minebench
-                    .get("json_output")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| minebench.get("raw_response").and_then(|v| v.as_str()))
-                    .unwrap_or("");
+                outputs.insert(model_name.clone(), serde_json::Value::Object(model_outputs));
+            } else if let Some(minebench) = raw.get("minebench") {
+                // Backward-compatible path for old format
+                let mut model_outputs = serde_json::Map::new();
+                if let Some(buildings) = minebench.get("buildings").and_then(|v| v.as_object()) {
+                    for (building_key, result) in buildings {
+                        let output_file = result
+                            .get("output_file")
+                            .and_then(|v| v.as_str())
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "output/{}-minebench-{}.json",
+                                    sanitize_filename(model_name),
+                                    sanitize_filename(building_key)
+                                )
+                            });
+                        let json_output = result
+                            .get("json_output")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| result.get("raw_response").and_then(|v| v.as_str()))
+                            .unwrap_or("");
 
-                if let Some(parent) = Path::new(&output_file).parent() {
-                    fs::create_dir_all(parent)?;
+                        if let Some(parent) = Path::new(&output_file).parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::write(&output_file, json_output)?;
+                        model_outputs.insert(
+                            building_key.clone(),
+                            serde_json::json!({ "output_file": output_file }),
+                        );
+                    }
                 }
-                fs::write(&output_file, json_output)?;
-                model_outputs.insert(
-                    DEFAULT_BUILDING_KEY.to_string(),
-                    serde_json::json!({ "output_file": output_file }),
-                );
+                outputs.insert(model_name.clone(), serde_json::Value::Object(model_outputs));
             }
-
-            outputs.insert(model_name.clone(), serde_json::Value::Object(model_outputs));
         }
 
         let raw_json = serde_json::json!({ "minebench_outputs": outputs });

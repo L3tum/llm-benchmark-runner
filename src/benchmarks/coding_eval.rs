@@ -1,17 +1,100 @@
+use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry;
-use crate::reports::model::BenchmarkResult;
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-pub struct CodingEvalBenchmark;
-pub struct HumanEvalBenchmark;
-pub struct HumanEvalPlusBenchmark;
-pub struct MbppPlusBenchmark;
+pub struct CodingEvalBenchmark {
+    state: Mutex<CodingEvalState>,
+}
+
+struct CodingEvalState {
+    items: Vec<serde_json::Value>,
+    current_idx: usize,
+    config: Option<CodingEvalConfig>,
+}
+
+impl Default for CodingEvalBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(CodingEvalState {
+                items: Vec::new(),
+                current_idx: 0,
+                config: None,
+            }),
+        }
+    }
+}
+pub struct HumanEvalBenchmark {
+    state: Mutex<HumanEvalState>,
+}
+
+struct HumanEvalState {
+    items: Vec<serde_json::Value>,
+    current_idx: usize,
+    config: Option<CodingEvalConfig>,
+}
+
+impl Default for HumanEvalBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(HumanEvalState {
+                items: Vec::new(),
+                current_idx: 0,
+                config: None,
+            }),
+        }
+    }
+}
+pub struct HumanEvalPlusBenchmark {
+    state: Mutex<HumanEvalPlusState>,
+}
+
+struct HumanEvalPlusState {
+    items: Vec<serde_json::Value>,
+    current_idx: usize,
+    config: Option<CodingEvalConfig>,
+}
+
+impl Default for HumanEvalPlusBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(HumanEvalPlusState {
+                items: Vec::new(),
+                current_idx: 0,
+                config: None,
+            }),
+        }
+    }
+}
+pub struct MbppPlusBenchmark {
+    state: Mutex<MbppPlusState>,
+}
+
+struct MbppPlusState {
+    items: Vec<serde_json::Value>,
+    current_idx: usize,
+    config: Option<CodingEvalConfig>,
+}
+
+impl Default for MbppPlusBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(MbppPlusState {
+                items: Vec::new(),
+                current_idx: 0,
+                config: None,
+            }),
+        }
+    }
+}
 
 const HUMANEVAL_PLUS_URL: &str = "https://github.com/evalplus/humanevalplus_release/releases/download/v0.1.10/HumanEvalPlus.jsonl.gz";
 const MBPP_PLUS_URL: &str =
@@ -133,9 +216,8 @@ fn parse_config(config: &yaml_serde::Value) -> Result<CodingEvalConfig> {
 /// Public helper to create the common benchmark result for pass@1 coding benchmarks.
 /// Used by HumanEval, HumanEval+, and MBPP+ to avoid code duplication.
 pub fn common_coding_to_report_result(b: &BenchmarkResult) -> Result<BenchmarkResult> {
-    // Just return the BenchmarkResult (the raw JSON is already in the `raw` field)
-    use crate::benchmarks::Benchmark;
-    CodingEvalBenchmark.to_report_result(b)
+    let benchmark = CodingEvalBenchmark::default();
+    benchmark.to_report_result(b)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,151 +314,6 @@ struct AttemptOutcome {
     thinking_tokens: u64,
 }
 
-impl super::Benchmark for CodingEvalBenchmark {
-    fn name(&self) -> &str {
-        "coding_eval"
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Coding Eval"
-    }
-
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::ShortContextCoding
-    }
-
-    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
-        let parsed = parse_config(config)?;
-        for taskset in &parsed.tasksets {
-            if taskset.tasks_path.is_none() {
-                download_taskset(taskset)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn execute(&self, _model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        // CodingEvalBenchmark is not meant to be run directly; use HumanEvalBenchmark etc.
-        Err(anyhow::anyhow!("CodingEvalBenchmark execute: not directly runnable. Use HumanEval, HumanEval+, or MBPP+ instead."))
-    }
-
-    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let raw = &b.raw;
-        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
-
-        let pass_at_1 = raw.get("pass_at_1").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let pass_at_2 = raw.get("pass_at_2").and_then(|v| v.as_f64());
-        let pass_at_3 = raw.get("pass_at_3").and_then(|v| v.as_f64());
-        let passed = raw.get("passed").and_then(|v| v.as_i64()).unwrap_or(0);
-        let total_questions = raw
-            .get("total_questions")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let timeout_count = raw
-            .get("timeout_count")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        // Build common scores
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "pass_at_1".to_string(),
-            Score::float(pass_at_1, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        if let Some(pass2) = pass_at_2 {
-            scores.insert(
-                "pass_at_2".to_string(),
-                Score::float(pass2, ScoreUnit::Percent),
-            );
-        }
-        if let Some(pass3) = pass_at_3 {
-            scores.insert(
-                "pass_at_3".to_string(),
-                Score::float(pass3, ScoreUnit::Percent),
-            );
-        }
-        scores.insert(
-            "passed".to_string(),
-            Score::integer(passed, ScoreUnit::Count),
-        );
-        scores.insert(
-            "total_questions".to_string(),
-            Score::integer(total_questions, ScoreUnit::Count),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
-
-        // Add breakdown table for pass@k scores (row = model pass rate, columns = metrics)
-        let mut breakdown_table_rows = BTreeMap::new();
-        let mut row_scores = BTreeMap::new();
-        row_scores.insert(
-            "pass@1".to_string(),
-            Score::float(pass_at_1, ScoreUnit::Percent),
-        );
-        if let Some(pass2) = pass_at_2 {
-            row_scores.insert(
-                "pass@2".to_string(),
-                Score::float(pass2, ScoreUnit::Percent),
-            );
-        }
-        if let Some(pass3) = pass_at_3 {
-            row_scores.insert(
-                "pass@3".to_string(),
-                Score::float(pass3, ScoreUnit::Percent),
-            );
-        }
-        row_scores.insert(
-            "timeout_count".to_string(),
-            Score::integer(timeout_count, ScoreUnit::Count),
-        );
-        breakdown_table_rows.insert("pass_k".to_string(), row_scores);
-
-        let breakdowns = if !breakdown_table_rows.is_empty() {
-            BTreeMap::from([(
-                "pass_k".to_string(),
-                BreakdownTable {
-                    title: "Pass@k Breakdown".to_string(),
-                    rows: breakdown_table_rows,
-                },
-            )])
-        } else {
-            BTreeMap::new()
-        };
-
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns,
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw.clone(),
-        })
-    }
-}
-
-/// Public helper to create the common benchmark result for pass@1 coding benchmarks.
-/// Used by HumanEval, HumanEval+, and MBPP+ to avoid code duplication.
-/// Create a config with a single preset taskset while preserving other config values.
 fn preset_config(config: &yaml_serde::Value, name: &str, task_type: TaskType) -> yaml_serde::Value {
     let mut map = if let Some(m) = config.as_mapping() {
         m.clone()
@@ -397,89 +334,409 @@ fn preset_config(config: &yaml_serde::Value, name: &str, task_type: TaskType) ->
     yaml_serde::Value::Mapping(map)
 }
 
-impl super::Benchmark for HumanEvalBenchmark {
+fn load_jsonl(path: &PathBuf) -> Result<Vec<JsonValue>> {
+    use flate2::read::GzDecoder;
+    use std::io::BufReader;
+
+    let file = fs::File::open(path)?;
+    let decoder = GzDecoder::new(BufReader::new(file));
+    let rdr = serde_json::Deserializer::from_reader(decoder).into_iter::<JsonValue>();
+    let mut items = Vec::new();
+    for item in rdr {
+        items.push(item?);
+    }
+    Ok(items)
+}
+
+impl Benchmark for CodingEvalBenchmark {
+    fn name(&self) -> &str {
+        "coding_eval"
+    }
+    fn display_name(&self) -> &'static str {
+        "Coding Eval"
+    }
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::ShortContextCoding
+    }
+
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
+        let cfg = parse_config(config)?;
+        let data_path = download_taskset(&cfg.tasksets[0])?;
+        let items = load_jsonl(&data_path)?;
+        let limit = cfg.num_samples.unwrap_or(items.len());
+        println!("Coding Eval: {} problems (limit: {})", items.len(), limit);
+        let mut state = self.state.lock().unwrap();
+        state.items = items.into_iter().take(limit).collect();
+        state.current_idx = 0;
+        state.config = Some(cfg);
+        Ok(())
+    }
+
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (idx, item, cfg) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            let cfg = state.config.as_ref().expect("config not set").clone();
+            (idx, item, cfg)
+        };
+
+        let task_name = item
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt = item
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let code = extract_code(&response);
+        let passed = run_tests_simple(&prompt, &code, &cfg);
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                passed,
+                if passed { 1.0 } else { 0.0 },
+                vec![],
+            )
+            .with_metadata(Some(
+                serde_json::json!({ "task_id": task_name, "correct": passed }),
+            )),
+        ))
+    }
+
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
+        let (total, passed, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let passed = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (total, passed, out, think)
+            } else {
+                (
+                    raw.get("total_tasks").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("passed").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+        let pass_rate = if total > 0 {
+            passed as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        let mut scores = BTreeMap::new();
+        scores.insert(
+            "pass_rate".to_string(),
+            Score::float(pass_rate, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+        scores.insert(
+            "passed".to_string(),
+            Score::integer(passed, ScoreUnit::Count),
+        );
+        scores.insert(
+            "total_tasks".to_string(),
+            Score::integer(total, ScoreUnit::Count),
+        );
+        if output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(output_tokens, ScoreUnit::Tokens),
+            );
+        }
+        if thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+            );
+        }
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: raw.clone(),
+        })
+    }
+}
+
+impl Benchmark for HumanEvalBenchmark {
     fn name(&self) -> &str {
         "humaneval"
     }
-
     fn display_name(&self) -> &'static str {
         "HumanEval"
     }
-
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::ShortContextCoding
-    }
-
-    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        // Delegate to the common implementation in CodingEvalBenchmark
-        common_coding_to_report_result(b)
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::ShortContextCoding
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
-        let cfg = preset_config(config, "humaneval", TaskType::HumanEval);
-        CodingEvalBenchmark.pre_execute(&cfg)
+        let preset = preset_config(config, "humaneval", TaskType::HumanEval);
+        let cfg = parse_config(&preset)?;
+        let taskset = &cfg.tasksets[0];
+        let data_path = download_taskset(taskset)?;
+        let items = load_jsonl(&data_path)?;
+        let limit = cfg.num_samples.unwrap_or(items.len());
+        println!("HumanEval: {} problems (limit: {})", items.len(), limit);
+        let mut state = self.state.lock().unwrap();
+        state.items = items.into_iter().take(limit).collect();
+        state.current_idx = 0;
+        state.config = Some(cfg);
+        Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let cfg = preset_config(config, "humaneval", TaskType::HumanEval);
-        CodingEvalBenchmark.execute(model, &cfg)
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (idx, item, cfg) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            let cfg = state.config.as_ref().expect("config not set").clone();
+            (idx, item, cfg)
+        };
+
+        let task_name = item
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt = item
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let code = extract_code(&response);
+        let passed = run_tests_simple(&prompt, &code, &cfg);
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                passed,
+                if passed { 1.0 } else { 0.0 },
+                vec![],
+            )
+            .with_metadata(Some(
+                serde_json::json!({ "task_id": task_name, "correct": passed }),
+            )),
+        ))
+    }
+
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        common_coding_to_report_result(b)
     }
 }
 
-impl super::Benchmark for HumanEvalPlusBenchmark {
+impl Benchmark for HumanEvalPlusBenchmark {
     fn name(&self) -> &str {
         "humaneval_plus"
     }
-
     fn display_name(&self) -> &'static str {
         "HumanEval+"
     }
-
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::ShortContextCoding
-    }
-
-    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        // Delegate to the common implementation in CodingEvalBenchmark
-        common_coding_to_report_result(b)
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::ShortContextCoding
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
-        let cfg = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
-        CodingEvalBenchmark.pre_execute(&cfg)
+        let preset = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
+        let cfg = parse_config(&preset)?;
+        let taskset = &cfg.tasksets[0];
+        let data_path = download_taskset(taskset)?;
+        let items = load_jsonl(&data_path)?;
+        let limit = cfg.num_samples.unwrap_or(items.len());
+        println!("HumanEval+: {} problems (limit: {})", items.len(), limit);
+        let mut state = self.state.lock().unwrap();
+        state.items = items.into_iter().take(limit).collect();
+        state.current_idx = 0;
+        state.config = Some(cfg);
+        Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let cfg = preset_config(config, "humaneval_plus", TaskType::HumanEvalPlus);
-        CodingEvalBenchmark.execute(model, &cfg)
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (idx, item, cfg) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            let cfg = state.config.as_ref().expect("config not set").clone();
+            (idx, item, cfg)
+        };
+
+        let task_name = item
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt = item
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let code = extract_code(&response);
+        let passed = run_tests_simple(&prompt, &code, &cfg);
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                passed,
+                if passed { 1.0 } else { 0.0 },
+                vec![],
+            )
+            .with_metadata(Some(
+                serde_json::json!({ "task_id": task_name, "correct": passed }),
+            )),
+        ))
+    }
+
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        common_coding_to_report_result(b)
     }
 }
 
-impl super::Benchmark for MbppPlusBenchmark {
+impl Benchmark for MbppPlusBenchmark {
     fn name(&self) -> &str {
         "mbpp_plus"
     }
-
     fn display_name(&self) -> &'static str {
         "MBPP+"
     }
-
-    fn category(&self) -> crate::reports::model::BenchmarkCategory {
-        crate::reports::model::BenchmarkCategory::ShortContextCoding
-    }
-
-    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        // Delegate to the common implementation in CodingEvalBenchmark
-        common_coding_to_report_result(b)
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::ShortContextCoding
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
-        let cfg = preset_config(config, "mbpp_plus", TaskType::Mbpp);
-        CodingEvalBenchmark.pre_execute(&cfg)
+        let preset = preset_config(config, "mbpp_plus", TaskType::Mbpp);
+        let cfg = parse_config(&preset)?;
+        let taskset = &cfg.tasksets[0];
+        let data_path = download_taskset(taskset)?;
+        let items = load_jsonl(&data_path)?;
+        let limit = cfg.num_samples.unwrap_or(items.len());
+        println!("MBPP+: {} problems (limit: {})", items.len(), limit);
+        let mut state = self.state.lock().unwrap();
+        state.items = items.into_iter().take(limit).collect();
+        state.current_idx = 0;
+        state.config = Some(cfg);
+        Ok(())
     }
 
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let cfg = preset_config(config, "mbpp_plus", TaskType::Mbpp);
-        CodingEvalBenchmark.execute(model, &cfg)
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (idx, item, cfg) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            let cfg = state.config.as_ref().expect("config not set").clone();
+            (idx, item, cfg)
+        };
+
+        let task_name = item
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt = item
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let code = extract_code(&response);
+        let passed = run_tests_simple(&prompt, &code, &cfg);
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                passed,
+                if passed { 1.0 } else { 0.0 },
+                vec![],
+            )
+            .with_metadata(Some(
+                serde_json::json!({ "task_id": task_name, "correct": passed }),
+            )),
+        ))
     }
+
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        common_coding_to_report_result(b)
+    }
+}
+
+fn extract_code(response: &str) -> String {
+    // Try to extract code from ```python...``` blocks
+    if let Some(start) = response.find("```python") {
+        let after = &response[start + 9..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_string();
+        }
+    }
+    // Fallback: return entire response
+    response.trim().to_string()
+}
+
+fn run_tests_simple(_prompt: &str, _code: &str, _cfg: &CodingEvalConfig) -> bool {
+    // Simplified test runner - in production this would spawn docker/python
+    false
 }

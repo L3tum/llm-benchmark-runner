@@ -1,17 +1,33 @@
 use crate::benchmarks::Benchmark;
-use crate::client::Client;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit};
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
-pub struct HaluEvalBenchmark;
+pub struct HaluEvalBenchmark {
+    state: Mutex<HaluEvalState>,
+}
 
-static DATASET: OnceLock<Vec<HaluEvalItem>> = OnceLock::new();
+struct HaluEvalState {
+    items: Vec<HaluEvalItem>,
+    current_idx: usize,
+}
+
+impl Default for HaluEvalBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(HaluEvalState {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct HaluEvalItem {
@@ -21,30 +37,28 @@ struct HaluEvalItem {
     label: String, // "hallucinated" or "not_hallucinated" or similar
 }
 
-fn load_halueval_dataset() -> &'static Vec<HaluEvalItem> {
-    DATASET.get_or_init(|| {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_default()
-            .join("llm-benchmark-runner")
-            .join("halueval");
-        let path = cache_dir.join("qa.json");
+fn load_halueval_dataset() -> Vec<HaluEvalItem> {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_default()
+        .join("llm-benchmark-runner")
+        .join("halueval");
+    let path = cache_dir.join("qa.json");
 
-        if path.exists() {
-            let content = fs::read_to_string(&path).expect("Failed to read cached HaluEval");
-            return serde_json::from_str(&content).expect("Failed to parse HaluEval");
-        }
+    if path.exists() {
+        let content = fs::read_to_string(&path).expect("Failed to read cached HaluEval");
+        return serde_json::from_str(&content).expect("Failed to parse HaluEval");
+    }
 
-        fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-        println!("  Downloading HaluEval dataset (requires HF_TOKEN)...");
-        let url = "https://huggingface.co/datasets/marsha1908/HaluEval/resolve/main/qa.json";
-        let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-            .expect("Failed to download HaluEval");
+    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    println!("  Downloading HaluEval dataset (requires HF_TOKEN)...");
+    let url = "https://huggingface.co/datasets/marsha1908/HaluEval/resolve/main/qa.json";
+    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+        .expect("Failed to download HaluEval");
 
-        let items: Vec<HaluEvalItem> =
-            serde_json::from_slice(&bytes).expect("Failed to parse HaluEval");
-        fs::write(&path, bytes).expect("Failed to save HaluEval");
-        items
-    })
+    let items: Vec<HaluEvalItem> =
+        serde_json::from_slice(&bytes).expect("Failed to parse HaluEval");
+    fs::write(&path, bytes).expect("Failed to save HaluEval");
+    items
 }
 
 impl Benchmark for HaluEvalBenchmark {
@@ -61,15 +75,32 @@ impl Benchmark for HaluEvalBenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let _ = load_halueval_dataset();
+        let items = load_halueval_dataset();
+        let mut state = self.state.lock().unwrap();
+        state.items = items;
+        state.current_idx = 0;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let dataset = load_halueval_dataset();
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (item, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            (item, idx)
+        };
 
-        let system_prompt = "You are a factuality evaluator. Given a question, context, and answer, determine if the answer contains hallucinated information (facts not supported by the context). Respond with 'hallucinated' or 'not_hallucinated'.";
+        let system_prompt =
+            "You are a factuality evaluator. Given a question, context, and answer, determine if the answer contains hallucinated information (facts not supported by the context). Respond with 'hallucinated' or 'not_hallucinated'.";
 
         let user_prompt = r#"Question: What did the cat do?
 Context: The cat was sleeping on the sofa.
@@ -86,75 +117,73 @@ Context: {context}
 Answer: {answer}
 Verdict:"#;
 
-        let total = dataset.len();
-        let mut correct = 0;
-        let mut output_tokens_total: i64 = 0;
-        let mut thinking_tokens_total: i64 = 0;
+        let prompt = user_prompt
+            .replace("{question}", &item.question)
+            .replace("{context}", &item.context)
+            .replace("{answer}", &item.answer);
 
-        for item in dataset {
-            let prompt = user_prompt
-                .replace("{question}", &item.question)
-                .replace("{context}", &item.context)
-                .replace("{answer}", &item.answer);
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
 
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let response = response.trim().to_lowercase();
+        let is_correct = match item.label.as_str() {
+            "hallucinated" => response.contains("hallucinated"),
+            "not_hallucinated" => response.contains("not_hallucinated"),
+            _ => response.contains("not_hallucinated"),
+        };
 
-            output_tokens_total += output_tokens.unwrap_or(0) as i64;
-            thinking_tokens_total += thinking_tokens.unwrap_or(0) as i64;
-
-            let response = response.trim().to_lowercase();
-            let is_correct = match item.label.as_str() {
-                "hallucinated" => response.contains("hallucinated"),
-                "not_hallucinated" => response.contains("not_hallucinated"),
-                _ => response.contains("not_hallucinated"),
-            };
-
-            if is_correct {
-                correct += 1;
-            }
-        }
-
-        let accuracy = correct as f64 / total as f64;
-        let raw_json = serde_json::json!({
-            "accuracy": accuracy,
-            "total": total,
-            "correct": correct,
-            "output_tokens": output_tokens_total,
-            "thinking_tokens": thinking_tokens_total,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!(
-                    "HaluEval QA: {}/{} correct ({:.1}%)",
-                    correct,
-                    total,
-                    accuracy * 100.0
-                ),
-            }],
-            raw: raw_json,
-        })
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                is_correct,
+                if is_correct { 1.0 } else { 0.0 },
+                vec![],
+            )
+            .with_metadata(Some(serde_json::json!({
+                "question": item.question,
+                "expected": item.label,
+                "response": response,
+            }))),
+        ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total = raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
-        let correct = raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let (total, correct, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let correct = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (total, correct, out, think)
+            } else {
+                (
+                    raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+
+        let accuracy = if total > 0 {
+            correct as f64 / total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(

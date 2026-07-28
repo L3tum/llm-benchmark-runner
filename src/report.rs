@@ -59,17 +59,17 @@ pub(crate) fn build_report_input(
         .format("%Y-%m-%d %H:%M:%S UTC")
         .to_string();
 
-    let benchmarks: Vec<&dyn crate::benchmarks::Benchmark> = vec![
-        &MmluProBenchmark,
-        &GpqaBenchmark,
-        &AimeBenchmark,
-        &Math500Benchmark,
-        &MinebenchBenchmark,
-        &CodingEvalBenchmark,
-        &SweBenchBenchmark,
-        &SweBenchVerifiedBenchmark,
-        &SweBenchProBenchmark,
-        &KldBenchmark,
+    let benchmarks: Vec<Box<dyn crate::benchmarks::Benchmark>> = vec![
+        Box::new(MmluProBenchmark::default()),
+        Box::new(GpqaBenchmark::default()),
+        Box::new(AimeBenchmark::default()),
+        Box::new(Math500Benchmark::default()),
+        Box::new(MinebenchBenchmark::default()),
+        Box::new(CodingEvalBenchmark::default()),
+        Box::new(SweBenchBenchmark::default()),
+        Box::new(SweBenchVerifiedBenchmark::default()),
+        Box::new(SweBenchProBenchmark::default()),
+        Box::new(KldBenchmark::default()),
     ];
 
     let mut tests = BTreeMap::new();

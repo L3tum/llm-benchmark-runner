@@ -1,17 +1,33 @@
 use crate::benchmarks::Benchmark;
-use crate::client::Client;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit};
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
-pub struct SquadV2Benchmark;
+pub struct SquadV2Benchmark {
+    state: Mutex<SquadV2State>,
+}
 
-static DATASET: OnceLock<Vec<SquadV2Item>> = OnceLock::new();
+struct SquadV2State {
+    items: Vec<SquadV2Item>,
+    current_idx: usize,
+}
+
+impl Default for SquadV2Benchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(SquadV2State {
+                items: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct SquadV2Item {
@@ -28,35 +44,17 @@ struct SquadV2Answer {
     answer_start: i64,
 }
 
-fn load_squad_v2() -> &'static Vec<SquadV2Item> {
-    DATASET.get_or_init(|| {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_default()
-            .join("llm-benchmark-runner")
-            .join("squad_v2");
-        let path = cache_dir.join("SQuAD2.0.json");
+fn load_squad_v2() -> Vec<SquadV2Item> {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_default()
+        .join("llm-benchmark-runner")
+        .join("squad_v2");
+    let path = cache_dir.join("SQuAD2.0.json");
 
-        if path.exists() {
-            let content = fs::read_to_string(&path).expect("Failed to read cached SQuAD 2.0");
-            let parsed: SQuADDataset =
-                serde_json::from_str(&content).expect("Failed to parse SQuAD 2.0");
-            let mut items = Vec::new();
-            for data_item in &parsed.data {
-                for paragraph in &data_item.paragraphs {
-                    for qa in &paragraph.qas {
-                        items.push(SquadV2Item {
-                            title: data_item.title.clone(),
-                            context: paragraph.context.clone(),
-                            question: qa.question.clone(),
-                            answers: qa.answers.clone(),
-                            is_impossible: qa.is_impossible,
-                        });
-                    }
-                }
-            }
-            return items;
-        }
-
+    let parsed: SQuADDataset = if path.exists() {
+        let content = fs::read_to_string(&path).expect("Failed to read cached SQuAD 2.0");
+        serde_json::from_str(&content).expect("Failed to parse SQuAD 2.0")
+    } else {
         fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
         println!("  Downloading SQuAD 2.0 dataset...");
         let url =
@@ -66,24 +64,25 @@ fn load_squad_v2() -> &'static Vec<SquadV2Item> {
 
         let parsed: SQuADDataset =
             serde_json::from_slice(&bytes).expect("Failed to parse SQuAD 2.0");
-        let mut items = Vec::new();
-        for data_item in &parsed.data {
-            for paragraph in &data_item.paragraphs {
-                for qa in &paragraph.qas {
-                    items.push(SquadV2Item {
-                        title: data_item.title.clone(),
-                        context: paragraph.context.clone(),
-                        question: qa.question.clone(),
-                        answers: qa.answers.clone(),
-                        is_impossible: qa.is_impossible,
-                    });
-                }
+        fs::write(&path, &bytes).expect("Failed to save SQuAD 2.0");
+        parsed
+    };
+
+    let mut items = Vec::new();
+    for data_item in &parsed.data {
+        for paragraph in &data_item.paragraphs {
+            for qa in &paragraph.qas {
+                items.push(SquadV2Item {
+                    title: data_item.title.clone(),
+                    context: paragraph.context.clone(),
+                    question: qa.question.clone(),
+                    answers: qa.answers.clone(),
+                    is_impossible: qa.is_impossible,
+                });
             }
         }
-
-        fs::write(&path, &bytes).expect("Failed to save SQuAD 2.0");
-        items
-    })
+    }
+    items
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,135 +124,187 @@ impl Benchmark for SquadV2Benchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let _ = load_squad_v2();
+        let items = load_squad_v2();
+        let mut state = self.state.lock().unwrap();
+        state.items = items;
+        state.current_idx = 0;
         Ok(())
     }
 
-    fn execute(&self, model: &Model, _config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let dataset = load_squad_v2();
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
-
-        let system_prompt = "You are a reading comprehension assistant. Answer the question using ONLY the provided context. If the answer cannot be found in the context, respond with 'no answer'.";
-
-        let user_prompt = r#"Context: {context}
-Question: {question}
-Answer:"#;
-
-        let total = dataset.len();
-        let mut exact_match_total = 0;
-        let mut f1_total: f64 = 0.0;
-        let mut output_tokens_total: i64 = 0;
-        let mut thinking_tokens_total: i64 = 0;
-        let mut unanswerable_correct = 0;
-        let mut unanswerable_total = 0;
-
-        for item in dataset {
-            let prompt = user_prompt
-                .replace("{context}", &item.context)
-                .replace("{question}", &item.question);
-
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, system_prompt, &prompt)?;
-
-            output_tokens_total += output_tokens.unwrap_or(0) as i64;
-            thinking_tokens_total += thinking_tokens.unwrap_or(0) as i64;
-
-            let response = response.trim();
-            let is_unanswerable = item.is_impossible.unwrap_or(false);
-
-            if is_unanswerable {
-                unanswerable_total += 1;
-                // For unanswerable questions, the correct response is "no answer"
-                let is_correct = response.to_lowercase().contains("no answer")
-                    || response.to_lowercase().contains("not answerable")
-                    || response.to_lowercase().contains("cannot be found");
-                if is_correct {
-                    unanswerable_correct += 1;
-                }
-            } else if let Some(ref answers) = item.answers {
-                if !answers.is_empty() {
-                    let response_lower = response.trim().to_lowercase();
-                    let best_em = answers
-                        .iter()
-                        .any(|a| a.text.trim().to_lowercase() == response_lower);
-
-                    let best_f1 = answers
-                        .iter()
-                        .map(|a| compute_f1(&a.text, response))
-                        .fold(0.0f64, f64::max);
-                    f1_total += best_f1 * 100.0;
-                    if best_em {
-                        exact_match_total += 1;
-                    }
-                }
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (item, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
             }
-        }
-
-        let em_score = exact_match_total as f64 / total as f64;
-        let f1_score = f1_total / total as f64;
-        let unanswerable_acc = if unanswerable_total > 0 {
-            unanswerable_correct as f64 / unanswerable_total as f64
-        } else {
-            0.0
+            let idx = state.current_idx;
+            let item = state.items[idx].clone();
+            state.current_idx += 1;
+            (item, idx)
         };
 
-        let raw_json = serde_json::json!({
-            "exact_match": em_score,
-            "f1": f1_score,
-            "total": total,
-            "exact_match_correct": exact_match_total,
-            "unanswerable_total": unanswerable_total,
-            "unanswerable_correct": unanswerable_correct,
-            "output_tokens": output_tokens_total,
-            "thinking_tokens": thinking_tokens_total,
-        });
+        let system_prompt =
+            "You are a reading comprehension assistant. Answer the question using ONLY the provided context. If the answer cannot be found in the context, respond with 'no answer'.";
 
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![
-                crate::reports::model::Diagnostic {
-                    level: "info".to_string(),
-                    message: format!(
-                        "SQuAD 2.0: EM {:.1}%, F1 {:.1}% (answerable), unanswerable accuracy {:.1}% ({}/{})",
-                        em_score, f1_score, unanswerable_acc * 100.0, unanswerable_correct, unanswerable_total
-                    ),
-                }
-            ],
-            raw: raw_json,
-        })
+        let user_prompt = "Context: {context}\nQuestion: {question}\nAnswer:";
+        let prompt = user_prompt
+            .replace("{context}", &item.context)
+            .replace("{question}", &item.question);
+
+        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        let response = response.trim();
+        let is_unanswerable = item.is_impossible.unwrap_or(false);
+
+        let (is_correct, f1, category) = if is_unanswerable {
+            let is_correct = response.to_lowercase().contains("no answer")
+                || response.to_lowercase().contains("not answerable")
+                || response.to_lowercase().contains("cannot be found");
+            (is_correct, 0.0, "unanswerable")
+        } else if let Some(ref answers) = item.answers {
+            if answers.is_empty() {
+                (false, 0.0, "answerable")
+            } else {
+                let response_lower = response.trim().to_lowercase();
+                let best_em = answers
+                    .iter()
+                    .any(|a| a.text.trim().to_lowercase() == response_lower);
+
+                let best_f1 = answers
+                    .iter()
+                    .map(|a| compute_f1(&a.text, response))
+                    .fold(0.0f64, f64::max);
+                (best_em, best_f1, "answerable")
+            }
+        } else {
+            (false, 0.0, "answerable")
+        };
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                is_correct,
+                f1 * 100.0,
+                vec![category.to_string()],
+            )
+            .with_metadata(Some(serde_json::json!({
+                "is_unanswerable": is_unanswerable,
+                "response": response,
+                "f1": f1,
+            }))),
+        ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        let em_score = raw
-            .get("exact_match")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let f1_score = raw.get("f1").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total = raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
-        let _exact_match_correct = raw
-            .get("exact_match_correct")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let unanswerable_total = raw
-            .get("unanswerable_total")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let unanswerable_correct = raw
-            .get("unanswerable_correct")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let (
+            total,
+            em_correct,
+            f1_total,
+            unanswerable_total,
+            unanswerable_correct,
+            output_tokens,
+            thinking_tokens,
+        ) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let em_correct = per_task
+                    .iter()
+                    .filter(|t| {
+                        t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false)
+                            && !t
+                                .get("categories")
+                                .and_then(|v| v.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|v| v.as_str())
+                                .map(|s| s == "unanswerable")
+                                .unwrap_or(false)
+                    })
+                    .count() as i64;
+                let f1_total: f64 = per_task
+                    .iter()
+                    .filter(|t| {
+                        !t.get("categories")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "unanswerable")
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|t| t.get("score").and_then(|v| v.as_f64()))
+                    .sum();
+                let unanswerable_tasks: Vec<_> = per_task
+                    .iter()
+                    .filter(|t| {
+                        t.get("categories")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "unanswerable")
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                let unanswerable_total = unanswerable_tasks.len() as i64;
+                let unanswerable_correct = unanswerable_tasks
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (
+                    total,
+                    em_correct,
+                    f1_total,
+                    unanswerable_total,
+                    unanswerable_correct,
+                    out,
+                    think,
+                )
+            } else {
+                (
+                    raw.get("total").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("exact_match_correct")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("f1").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    raw.get("unanswerable_total")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("unanswerable_correct")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+
+        let answerable_total = total.saturating_sub(unanswerable_total);
+        let em_score = if answerable_total > 0 {
+            em_correct as f64 / answerable_total as f64
+        } else {
+            0.0
+        };
+        let f1_score = if answerable_total > 0 {
+            f1_total / answerable_total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(
@@ -300,7 +351,7 @@ Answer:"#;
                 level: "info".to_string(),
                 message: format!(
                     "SQuAD 2.0: EM {:.1}%, F1 {:.1}% (answerable), unanswerable accuracy {:.1}% ({}/{})",
-                    em_score, f1_score, unanswerable_correct as f64 / unanswerable_total.max(1) as f64 * 100.0,
+                    em_score * 100.0, f1_score * 100.0, unanswerable_correct as f64 / unanswerable_total.max(1) as f64 * 100.0,
                     unanswerable_correct, unanswerable_total
                 ),
             }],

@@ -163,44 +163,7 @@ impl DockerRunner {
             .arg("--name")
             .arg(&container_name);
 
-        if config.network_none {
-            command.arg("--network").arg("none");
-        }
-        if config.read_only_root {
-            command.arg("--read-only");
-        }
-        for tmpfs in &config.tmpfs {
-            command.arg("--tmpfs").arg(tmpfs);
-        }
-        if config.cap_drop_all {
-            command.arg("--cap-drop=ALL");
-        }
-        if config.no_new_privileges {
-            command.arg("--security-opt=no-new-privileges");
-        }
-        if let Some(limit) = config.pids_limit {
-            command.arg("--pids-limit").arg(limit.to_string());
-        }
-        if let Some(memory) = &config.memory {
-            command.arg("--memory").arg(memory);
-        }
-        for mount in &config.mounts {
-            let source = if mount.map_host_repo_path {
-                docker_mount_source(&mount.source, config.host_repo_path.as_deref())?
-            } else {
-                mount.source.clone()
-            };
-            let mode = if mount.readonly { "ro" } else { "rw" };
-            command
-                .arg("-v")
-                .arg(format!("{}:{}:{}", source.display(), mount.target, mode));
-        }
-        if let Some(workdir) = &config.workdir {
-            command.arg("-w").arg(workdir);
-        }
-        for (key, value) in &config.env {
-            command.arg("-e").arg(format!("{}={}", key, value));
-        }
+        Self::build_run_command(&mut command, config)?;
         command.arg(&config.image);
         for arg in &config.command {
             command.arg(arg);
@@ -214,6 +177,123 @@ impl DockerRunner {
                 .arg(&container_name)
                 .output();
         })
+    }
+
+    /// Start a detached container and return its ID/name.
+    /// The caller is responsible for stopping it later.
+    pub fn run_detached(config: &DockerRunConfig) -> Result<String> {
+        let container_name = docker_container_name(&config.name_prefix);
+        let mut command = Command::new("docker");
+        command
+            .arg("run")
+            .arg("-d") // detached
+            .arg("--name")
+            .arg(&container_name);
+
+        Self::build_run_command(&mut command, config)?;
+        // Run a long-running process to keep container alive
+        command.arg(&config.image).arg("sleep").arg("3600");
+
+        let output = command
+            .output()
+            .with_context(|| "failed to start docker container")?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "docker run failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(container_name)
+    }
+
+    /// Execute a command in a running container and return stdout.
+    pub fn exec(container: &str, command: &str) -> Result<String> {
+        let output = Command::new("docker")
+            .arg("exec")
+            .arg(container)
+            .arg("sh")
+            .arg("-c")
+            .arg(command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| format!("failed to exec in container {}", container))?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Stop and remove a container.
+    pub fn stop(container: &str) -> Result<()> {
+        let _ = Command::new("docker")
+            .arg("stop")
+            .arg("-t")
+            .arg("5")
+            .arg(container)
+            .output();
+        let _ = Command::new("docker")
+            .arg("rm")
+            .arg("-f")
+            .arg(container)
+            .output();
+        Ok(())
+    }
+
+    /// Copy files from host to a running container.
+    pub fn cp_to(container: &str, src: &Path, dest: &str) -> Result<()> {
+        let src = src.canonicalize()?;
+        let src_str = src.to_string_lossy().to_string();
+        Command::new("docker")
+            .arg("cp")
+            .arg(&src_str)
+            .arg(format!("{}:{}", container, dest))
+            .output()
+            .with_context(|| format!("failed to cp to container {}", container))?;
+        Ok(())
+    }
+
+    /// Apply all shared `docker run` flags from config to a command.
+    /// Used by both `run()` and `run_detached()` — caller must already have
+    /// initialised the command with `"docker run ..."` and must append the
+    /// image + command arguments after calling this.
+    fn build_run_command(cmd: &mut Command, config: &DockerRunConfig) -> Result<()> {
+        if config.network_none {
+            cmd.arg("--network").arg("none");
+        }
+        if config.read_only_root {
+            cmd.arg("--read-only");
+        }
+        for tmpfs in &config.tmpfs {
+            cmd.arg("--tmpfs").arg(tmpfs);
+        }
+        if config.cap_drop_all {
+            cmd.arg("--cap-drop=ALL");
+        }
+        if config.no_new_privileges {
+            cmd.arg("--security-opt=no-new-privileges");
+        }
+        if let Some(limit) = config.pids_limit {
+            cmd.arg("--pids-limit").arg(limit.to_string());
+        }
+        if let Some(memory) = &config.memory {
+            cmd.arg("--memory").arg(memory);
+        }
+        for mount in &config.mounts {
+            let source: PathBuf = if mount.map_host_repo_path {
+                docker_mount_source(&mount.source, config.host_repo_path.as_deref())?
+            } else {
+                mount.source.clone()
+            };
+            let mode = if mount.readonly { "ro" } else { "rw" };
+            cmd.arg("-v")
+                .arg(format!("{}:{}:{}", source.display(), mount.target, mode));
+        }
+        if let Some(workdir) = &config.workdir {
+            cmd.arg("-w").arg(workdir);
+        }
+        for (key, value) in &config.env {
+            cmd.arg("-e").arg(format!("{}={}", key, value));
+        }
+        Ok(())
     }
 }
 

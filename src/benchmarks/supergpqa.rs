@@ -1,7 +1,8 @@
-use crate::client::Client;
+use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit};
+use crate::reports::model::{BenchmarkCategory, BenchmarkResult, TaskResult};
+use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use rand::prelude::SliceRandom;
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Single SuperGPQA item from the JSONL dataset.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -29,7 +31,28 @@ struct SuperGpqaItem {
     is_calculation: bool,
 }
 
-pub struct SuperGpqaBenchmark;
+pub struct SuperGpqaBenchmark {
+    state: Mutex<SuperGpqaState>,
+}
+
+struct SuperGpqaState {
+    items: Vec<SuperGpqaItem>,
+    current_idx: usize,
+    wrong_classes:
+        std::collections::BTreeMap<crate::benchmarks::answer_classifier::WrongAnswerClass, i64>,
+}
+
+impl Default for SuperGpqaBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(SuperGpqaState {
+                items: Vec::new(),
+                current_idx: 0,
+                wrong_classes: std::collections::BTreeMap::new(),
+            }),
+        }
+    }
+}
 
 fn load_jsonl_data(path: &PathBuf) -> Result<Vec<SuperGpqaItem>> {
     use std::io::{BufRead, BufReader};
@@ -84,7 +107,7 @@ fn group_all(items: Vec<SuperGpqaItem>) -> GroupedData {
     (by_discipline, by_field, by_subfield, by_difficulty)
 }
 
-impl super::Benchmark for SuperGpqaBenchmark {
+impl Benchmark for SuperGpqaBenchmark {
     fn name(&self) -> &str {
         "supergpqa"
     }
@@ -97,37 +120,196 @@ impl super::Benchmark for SuperGpqaBenchmark {
         BenchmarkCategory::Knowledge
     }
 
-    fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        self.download_dataset()?;
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
+        let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
+        let data_path = self.download_dataset()?;
+        let all_items = load_jsonl_data(&data_path)?;
+
+        let subjects_filter = config.get("subjects");
+        let subjects: Option<Vec<String>> = match subjects_filter {
+            Some(s) if s.is_string() => Some(
+                s.as_str()
+                    .unwrap()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect(),
+            ),
+            _ => None,
+        };
+
+        let all_data = group_all(all_items);
+        let available_disciplines: Vec<String> = all_data.0.keys().cloned().collect();
+        let disciplines_to_eval: Vec<String> = if let Some(subj) = &subjects {
+            let mut result = Vec::new();
+            for s in subj {
+                if all_data.0.contains_key(s) {
+                    result.push(s.clone());
+                } else {
+                    eprintln!(
+                        "  WARNING: SuperGPQA discipline '{}' not found. Available: {:?}",
+                        s, available_disciplines
+                    );
+                }
+            }
+            result
+        } else {
+            available_disciplines
+        };
+
+        // Flatten disciplines into single list
+        let mut items = Vec::new();
+        for disc in &disciplines_to_eval {
+            if let Some(questions) = all_data.0.get(disc) {
+                let qs = match num_samples {
+                    Some(n) if questions.len() > n as usize => questions[..n as usize].to_vec(),
+                    _ => questions.clone(),
+                };
+                items.extend(qs);
+            }
+        }
+
+        // Shuffle with seed
+        let seed = config.get("seed").and_then(|v| v.as_i64()).unwrap_or(42);
+        let mut rng = StdRng::seed_from_u64(seed as u64);
+        items.shuffle(&mut rng);
+
+        println!("Evaluating SuperGPQA: {} total questions", items.len());
+
+        let mut state = self.state.lock().unwrap();
+        state.items = items;
+        state.current_idx = 0;
+        state.wrong_classes = BTreeMap::new();
         Ok(())
     }
 
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        use crate::benchmarks::answer_classifier::classify_wrong_answer;
+
+        let (q, idx) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.items.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let q = state.items[idx].clone();
+            state.current_idx += 1;
+            (q, idx)
+        };
+
+        let question_text = q.question.clone();
+        let choice_map = "ABCD";
+        let mut prompt = format!(
+            "The following are multiple choice questions (with answers) about {}. Think step by step and then output the answer in the format of \"The answer is (X)\" at the end.\n\n",
+            q.discipline
+        );
+        prompt.push_str(&format!("Question: {}\nOptions: ", question_text));
+        for (i, opt) in q.options.iter().enumerate() {
+            prompt.push_str(&format!("{}: {}\n", &choice_map[i..i + 1], opt));
+        }
+        prompt.push_str("Answer: ");
+
+        let response = tracker.chat_completion(&model.model_name, "", &prompt)?;
+        let pred = extract_answer(&response);
+        let expected = q.answer_letter.chars().next();
+        let is_correct = pred == expected;
+
+        if !is_correct {
+            let wrong_class =
+                classify_wrong_answer(&response, &question_text, expected.unwrap_or('?'), pred);
+            let mut state = self.state.lock().unwrap();
+            let counter = state.wrong_classes.entry(wrong_class).or_insert(0);
+            *counter += 1;
+        }
+
+        // Build categories from all dimensions
+        let categories = vec![
+            q.discipline.clone(),
+            q.field.clone(),
+            q.subfield.clone(),
+            q.difficulty.clone(),
+        ];
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                is_correct,
+                if is_correct { 1.0 } else { 0.0 },
+                categories,
+            )
+            .with_metadata(Some(serde_json::json!({
+                "question": question_text,
+                "expected": expected.map(|c| c.to_string()),
+                "predicted": pred.map(|c| c.to_string()),
+                "correct": is_correct,
+                "discipline": q.discipline,
+                "field": q.field,
+                "subfield": q.subfield,
+                "difficulty": q.difficulty,
+            }))),
+        ))
+    }
+
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        use crate::benchmarks::answer_classifier::WrongAnswerClass;
+        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
+
         let raw = &b.raw;
-        let accuracy = raw.get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_questions = raw
-            .get("total_questions")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let output_tokens = raw
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let thinking_tokens = raw
-            .get("thinking_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let (total, correct, _wrong, output_tokens, thinking_tokens) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let correct = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                let wrong = total - correct;
+                let out: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                let think: i64 = per_task
+                    .iter()
+                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
+                    .sum();
+                (total, correct, wrong, out, think)
+            } else {
+                (
+                    raw.get("total_questions")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("correct").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("wrong").and_then(|v| v.as_i64()).unwrap_or(0),
+                    raw.get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    raw.get("thinking_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                )
+            }
+        };
+
+        let accuracy = if total > 0 {
+            correct as f64 / total as f64
+        } else {
+            0.0
+        };
 
         let mut scores = BTreeMap::new();
         scores.insert(
             "accuracy".to_string(),
-            Score::float(accuracy, ScoreUnit::Percent)
+            Score::float(accuracy * 100.0, ScoreUnit::Percent)
                 .primary(true)
                 .higher_is_better(true),
         );
         scores.insert(
             "total_questions".to_string(),
-            Score::integer(total_questions, ScoreUnit::Count),
+            Score::integer(total, ScoreUnit::Count),
         );
         if output_tokens > 0 {
             scores.insert(
@@ -142,277 +324,90 @@ impl super::Benchmark for SuperGpqaBenchmark {
             );
         }
 
-        // Build breakdown tables
+        // Build breakdowns from per_task categories
         let mut breakdowns = BTreeMap::new();
-
-        // Helper to create a breakdown table from a results JSON object
-        fn build_breakdown_table(title: &str, data: &serde_json::Value) -> BreakdownTable {
-            let mut rows = BTreeMap::new();
-            if let Some(obj) = data.as_object() {
-                for (key, val) in obj {
-                    if let Some(obj) = val.as_object() {
-                        let acc = obj.get("acc").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let correct = obj.get("corr").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let wrong = obj.get("wrong").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let mut row_scores = BTreeMap::new();
-                        row_scores.insert(
-                            "accuracy".to_string(),
-                            Score::float(acc, ScoreUnit::Percent),
-                        );
-                        row_scores.insert(
-                            "correct".to_string(),
-                            Score::integer(correct, ScoreUnit::Count),
-                        );
-                        row_scores
-                            .insert("wrong".to_string(), Score::integer(wrong, ScoreUnit::Count));
-                        rows.insert(key.clone(), row_scores);
+        if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+            for dim in &["discipline", "field", "subfield", "difficulty"] {
+                let mut cat_map: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+                for task in per_task {
+                    if let Some(meta) = task.get("metadata").and_then(|v| v.as_object()) {
+                        if let Some(cat) = meta.get(*dim).and_then(|v| v.as_str()) {
+                            let entry = cat_map.entry(cat.to_string()).or_insert((0, 0));
+                            entry.1 += 1;
+                            if task
+                                .get("passed")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
+                                entry.0 += 1;
+                            }
+                        }
                     }
                 }
-            }
-            BreakdownTable {
-                title: title.to_string(),
-                rows,
+                let mut rows = BTreeMap::new();
+                for (cat, (corr, t)) in cat_map {
+                    let acc = if t > 0 { corr as f64 / t as f64 } else { 0.0 };
+                    rows.insert(
+                        cat,
+                        BTreeMap::from([
+                            (
+                                "accuracy".to_string(),
+                                Score::float(acc * 100.0, ScoreUnit::Percent),
+                            ),
+                            (
+                                "correct".to_string(),
+                                Score::integer(corr, ScoreUnit::Count),
+                            ),
+                            (
+                                "wrong".to_string(),
+                                Score::integer(t - corr, ScoreUnit::Count),
+                            ),
+                        ]),
+                    );
+                }
+                if !rows.is_empty() {
+                    breakdowns.insert(
+                        dim.to_string(),
+                        BreakdownTable {
+                            title: format!("{} Breakdown", dim.to_ascii_uppercase()),
+                            rows,
+                        },
+                    );
+                }
             }
         }
 
-        // Add breakdowns for discipline (primary), field, subfield, and difficulty
-        if let Some(discipline_data) = raw.get("results_by_discipline") {
-            breakdowns.insert(
-                "discipline".to_string(),
-                build_breakdown_table("Discipline Breakdown", discipline_data),
-            );
-        }
-        if let Some(field_data) = raw.get("results_by_field") {
-            breakdowns.insert(
-                "field".to_string(),
-                build_breakdown_table("Field Breakdown", field_data),
-            );
-        }
-        if let Some(subfield_data) = raw.get("results_by_subfield") {
-            breakdowns.insert(
-                "subfield".to_string(),
-                build_breakdown_table("Subfield Breakdown", subfield_data),
-            );
-        }
-        if let Some(difficulty_data) = raw.get("results_by_difficulty") {
-            breakdowns.insert(
-                "difficulty".to_string(),
-                build_breakdown_table("Difficulty Breakdown", difficulty_data),
-            );
-        }
+        // Error classification
+        let error_classification: BTreeMap<WrongAnswerClass, i64> = raw
+            .get("error_classification")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(key, val)| {
+                        let class = match key.as_str() {
+                            "Wrong Answer Key" => Some(WrongAnswerClass::WrongAnswerKey),
+                            "Invalid Answer Key" => Some(WrongAnswerClass::InvalidAnswerKey),
+                            "No Answer" => Some(WrongAnswerClass::NoAnswer),
+                            "Uncertainty" => Some(WrongAnswerClass::Uncertainty),
+                            "Refused" => Some(WrongAnswerClass::Refused),
+                            "Looping" => Some(WrongAnswerClass::Looping),
+                            "Truncated" => Some(WrongAnswerClass::Truncated),
+                            "Off-Topic / Hallucination" => Some(WrongAnswerClass::OffTopic),
+                            _ => None,
+                        };
+                        class.zip(val.as_i64())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(BenchmarkResult {
             scores,
             breakdowns,
-            error_classification: BTreeMap::new(),
+            error_classification,
             artifacts: vec![],
             diagnostics: vec![],
             raw: raw.clone(),
-        })
-    }
-
-    fn execute(&self, model: &Model, config: &yaml_serde::Value) -> Result<BenchmarkResult> {
-        let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
-        let num_samples: Option<i64> = config.get("num_samples").and_then(|v| v.as_i64());
-        let subjects_filter = config.get("subjects");
-        let subjects: Option<Vec<String>> = match subjects_filter {
-            Some(s) if s.is_string() => Some(
-                s.as_str()
-                    .unwrap()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect(),
-            ),
-            Some(s) if s.is_null() => None,
-            _ => None,
-        };
-
-        let data_path = self.download_dataset()?;
-        let all_items = load_jsonl_data(&data_path)?;
-
-        // Group data by discipline, field, subfield, and difficulty in a single pass
-        let (by_discipline, by_field, by_subfield, _by_difficulty) = group_all(all_items);
-
-        // Determine which disciplines/fields/subfields to evaluate
-        let subjects_to_eval: Vec<String> = if let Some(subj) = subjects {
-            // Collect matching disciplines, fields, and subfields
-            let mut result = Vec::new();
-            let all_disciplines: Vec<String> = by_discipline.keys().cloned().collect();
-            let all_fields: Vec<String> = by_field.keys().cloned().collect();
-            let all_subfields: Vec<String> = by_subfield.keys().cloned().collect();
-
-            for s in &subj {
-                if by_discipline.contains_key(s)
-                    || by_field.contains_key(s)
-                    || by_subfield.contains_key(s)
-                {
-                    result.push(s.clone());
-                } else {
-                    eprintln!(
-                        "  WARNING: SuperGPQA category '{}' not found, skipping. Available disciplines: {:?}, fields: {:?}, subfields: {:?}",
-                        s, all_disciplines, all_fields, all_subfields
-                    );
-                }
-            }
-            result
-        } else {
-            // Use all available disciplines by default
-            by_discipline.keys().cloned().collect()
-        };
-
-        // Evaluate all matching questions (by discipline or field or subfield)
-        let mut total_questions = 0usize;
-        let mut total_output_tokens: u64 = 0;
-        let mut total_thinking_tokens: u64 = 0;
-
-        // Group results by discipline, field, subfield, and difficulty for reporting
-
-        // Collect all questions to evaluate based on subject filter
-        let mut all_questions: Vec<SuperGpqaItem> = Vec::new();
-        for subject in &subjects_to_eval {
-            // Check if it matches a discipline
-            if let Some(questions) = by_discipline.get(subject) {
-                for q in questions {
-                    if !all_questions.iter().any(|item| item.uuid == q.uuid) {
-                        all_questions.push(q.clone());
-                    }
-                }
-            } else if let Some(questions) = by_field.get(subject) {
-                for q in questions {
-                    if !all_questions.iter().any(|item| item.uuid == q.uuid) {
-                        all_questions.push(q.clone());
-                    }
-                }
-            } else if let Some(questions) = by_subfield.get(subject) {
-                for q in questions {
-                    if !all_questions.iter().any(|item| item.uuid == q.uuid) {
-                        all_questions.push(q.clone());
-                    }
-                }
-            }
-        }
-
-        // Read optional seed for reproducible shuffling (seed=0 is default for determinism)
-        let seed: u64 = config
-            .get("seed")
-            .and_then(|v| v.as_i64())
-            .map(|s| s as u64)
-            .unwrap_or(0);
-
-        // Apply num_samples if set
-        let questions: Vec<SuperGpqaItem> = match num_samples {
-            Some(n) if all_questions.len() > n as usize => {
-                let mut questions_vec = all_questions.clone();
-                // Use seed-based shuffle for reproducible sampling (use UUID as fallback)
-                let mut rng = StdRng::seed_from_u64(seed);
-                questions_vec.shuffle(&mut rng);
-                questions_vec[..n as usize].to_vec()
-            }
-            _ => all_questions,
-        };
-
-        println!(
-            "\nEvaluating SuperGPQA: {} questions (zero-shot CoT)",
-            questions.len()
-        );
-
-        let mut discipline_correct: HashMap<String, usize> = HashMap::new();
-        let mut discipline_total: HashMap<String, usize> = HashMap::new();
-        let mut field_correct: HashMap<String, usize> = HashMap::new();
-        let mut field_total: HashMap<String, usize> = HashMap::new();
-        let mut subfield_correct: HashMap<String, usize> = HashMap::new();
-        let mut subfield_total: HashMap<String, usize> = HashMap::new();
-        let mut difficulty_correct: HashMap<String, usize> = HashMap::new();
-        let mut difficulty_total: HashMap<String, usize> = HashMap::new();
-
-        for q in &questions {
-            let question_text = q.question.clone();
-            let mut prompt = format!(
-                "The following are multiple choice questions (with answers) about {}. Think step by step and then output the answer in the format of \"The answer is (X)\" at the end.\n\n",
-                q.subfield
-            );
-            prompt.push_str(&format!("Question: {}\nOptions: ", question_text));
-            for (i, opt) in q.options.iter().enumerate() {
-                let letter = (b'A' + i as u8) as char;
-                prompt.push_str(&format!("{}: {}\n", letter, opt));
-            }
-            prompt.push_str("Answer: ");
-
-            let (response, output_tokens, thinking_tokens) =
-                client.chat_completion(&model.model_name, "", &prompt)?;
-            total_output_tokens += output_tokens.unwrap_or(0);
-            total_thinking_tokens += thinking_tokens.unwrap_or(0);
-
-            let pred = extract_answer(&response).ok_or_else(|| {
-                eprintln!("  Error extracting answer from: {}", response);
-                anyhow::anyhow!("Cannot extract answer")
-            })?;
-
-            let is_correct = pred == q.answer_letter.chars().next().unwrap_or(pred);
-            if is_correct {
-                *discipline_correct.entry(q.discipline.clone()).or_insert(0) += 1;
-                *field_correct.entry(q.field.clone()).or_insert(0) += 1;
-                *subfield_correct.entry(q.subfield.clone()).or_insert(0) += 1;
-                *difficulty_correct.entry(q.difficulty.clone()).or_insert(0) += 1;
-            }
-            *discipline_total.entry(q.discipline.clone()).or_insert(0) += 1;
-            *field_total.entry(q.field.clone()).or_insert(0) += 1;
-            *subfield_total.entry(q.subfield.clone()).or_insert(0) += 1;
-            *difficulty_total.entry(q.difficulty.clone()).or_insert(0) += 1;
-
-            total_questions += 1;
-        }
-
-        // Build record maps for discipline, field, subfield, and difficulty
-        fn build_category_record(
-            category_correct: &HashMap<String, usize>,
-            category_total: &HashMap<String, usize>,
-        ) -> serde_json::Map<String, serde_json::Value> {
-            let mut record = serde_json::Map::new();
-            let all_keys: Vec<String> = category_total.keys().cloned().collect();
-            for key in &all_keys {
-                let correct = *category_correct.get(key).unwrap_or(&0);
-                let total = *category_total.get(key).unwrap_or(&0);
-                let wrong = total - correct;
-                let acc = if total > 0 {
-                    correct as f64 / total as f64
-                } else {
-                    0.0
-                };
-                let mut obj = serde_json::Map::new();
-                obj.insert("acc".to_string(), serde_json::json!(acc));
-                obj.insert("corr".to_string(), serde_json::json!(correct));
-                obj.insert("wrong".to_string(), serde_json::json!(wrong));
-                record.insert(key.clone(), serde_json::Value::Object(obj));
-            }
-            record
-        }
-
-        let total_correct: usize = discipline_correct.values().sum();
-        let overall_accuracy = if total_questions > 0 {
-            total_correct as f64 / total_questions as f64
-        } else {
-            0.0
-        };
-
-        let raw_json = serde_json::json!({
-            "accuracy": overall_accuracy,
-            "results_by_discipline": serde_json::Value::Object(build_category_record(&discipline_correct, &discipline_total)),
-            "results_by_field": serde_json::Value::Object(build_category_record(&field_correct, &field_total)),
-            "results_by_subfield": serde_json::Value::Object(build_category_record(&subfield_correct, &subfield_total)),
-            "results_by_difficulty": serde_json::Value::Object(build_category_record(&difficulty_correct, &difficulty_total)),
-            "total_questions": total_questions,
-            "output_tokens": total_output_tokens,
-            "thinking_tokens": total_thinking_tokens,
-        });
-
-        Ok(BenchmarkResult {
-            scores: BTreeMap::new(),
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw_json,
         })
     }
 }
