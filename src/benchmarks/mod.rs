@@ -209,6 +209,10 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
             Box::new(swe_bench::SweBenchProBenchmark::default()) as Box<dyn Benchmark>,
         );
         map.insert(
+            "swebench_multilingual".to_string(),
+            Box::new(swe_bench::SweBenchMultilingualBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
             "tool_hallucination".to_string(),
             Box::new(tool_hallucination::ToolHallucinationBenchmark::default())
                 as Box<dyn Benchmark>,

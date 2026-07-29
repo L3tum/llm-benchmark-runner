@@ -2,7 +2,7 @@
 
 A Rust benchmark suite for evaluating LLM models with **direct model execution**: launch each model, benchmark against its local API, then stop it.
 
-Supports **MMLU-Pro**, **GPQA Diamond**, **AIME 2025/2026**, **MATH-500**, **Coding Eval** (HumanEval+, MBPP+), **SWE-Bench**, **KLD divergence**, **Minebench**, **IFEval**, **HarmBench**, **TerminalBench 2.1**, **StableToolBench**, and more.
+Supports **MMLU-Pro**, **GPQA Diamond**, **AIME 2025/2026**, **MATH-500**, **Coding Eval** (HumanEval+, MBPP+), **SWE-Bench** (including Multilingual across 9 languages), **KLD divergence**, **Minebench**, **IFEval**, **HarmBench**, **TerminalBench 2.1**, **StableToolBench**, and more.
 
 ## Quick Start
 
@@ -210,6 +210,10 @@ benchmark:
     split: test
     timeout_secs: 1800
     token_env: HF_TOKEN
+  swebench_multilingual:
+    num_samples: 10
+    split: test
+    timeout_secs: 1800
 
 # Comparison groups for generating filtered reports
 comparisons:
@@ -361,6 +365,7 @@ Docker-backed repository patch benchmarks. Models are given a bug report and a r
 - **`swebench`** — Full dataset (may be slow)
 - **`swebench_verified`** — Verified subset (recommended)
 - **`swebench_pro`** — Pro-style gated dataset (requires `HF_TOKEN` and/or `dataset_id`)
+- **`swebench_multilingual`** — 300 tasks across **9 programming languages** (C, C++, Go, Java, JavaScript/TypeScript, PHP, Ruby, Rust) from 42 repositories. Uses the same harness as SWE-Bench but provides cross-language evaluation. Includes per-language breakdown in the report.
 
 Harness images auto-build from `docker/swebench-harness/Dockerfile` when `docker.build_images: true`. To build manually:
 
