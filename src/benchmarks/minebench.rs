@@ -527,6 +527,209 @@ impl Benchmark for MinebenchBenchmark {
     }
 }
 
+/// Minebench using OpenAI-style structured tools.
+pub struct MinebenchToolsBenchmark {
+    state: Mutex<MinebenchState>,
+}
+
+impl Default for MinebenchToolsBenchmark {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(MinebenchState {
+                buildings: Vec::new(),
+                current_idx: 0,
+            }),
+        }
+    }
+}
+
+impl Benchmark for MinebenchToolsBenchmark {
+    fn name(&self) -> &str {
+        "minebench_tools"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Minebench (Tools)"
+    }
+
+    fn category(&self) -> BenchmarkCategory {
+        BenchmarkCategory::Creative
+    }
+
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
+        let buildings = configured_buildings(config)?;
+        let mut state = self.state.lock().unwrap();
+        state.buildings = buildings;
+        state.current_idx = 0;
+        Ok(())
+    }
+
+    fn execute_one(
+        &self,
+        model: &Model,
+        _config: &yaml_serde::Value,
+        tracker: &mut TokenTracker,
+    ) -> Result<Option<TaskResult>> {
+        let (idx, building_key, build) = {
+            let mut state = self.state.lock().unwrap();
+            if state.current_idx >= state.buildings.len() {
+                return Ok(None);
+            }
+            let idx = state.current_idx;
+            let (building_key, build) = state.buildings[idx].clone();
+            state.current_idx += 1;
+            (idx, building_key, build)
+        };
+
+        let system = "You are a master 3D voxel architect. Use the provided tools to add building elements. Call each tool as needed to construct the requested building.";
+
+        let tools: Vec<serde_json::Value> = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "add_box",
+                    "description": "Add a rectangular box to the build.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "x1": { "type": "integer", "description": "X coordinate of corner 1" },
+                            "y1": { "type": "integer", "description": "Y coordinate of corner 1" },
+                            "z1": { "type": "integer", "description": "Z coordinate of corner 1" },
+                            "x2": { "type": "integer", "description": "X coordinate of corner 2" },
+                            "y2": { "type": "integer", "description": "Y coordinate of corner 2" },
+                            "z2": { "type": "integer", "description": "Z coordinate of corner 2" },
+                            "block_type": { "type": "string", "description": "Minecraft block ID (e.g., stone, oak_planks, glass)" }
+                        },
+                        "required": ["x1", "y1", "z1", "x2", "y2", "z2", "block_type"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "add_line",
+                    "description": "Add a line between two points.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "from_x": { "type": "integer" },
+                            "from_y": { "type": "integer" },
+                            "from_z": { "type": "integer" },
+                            "to_x": { "type": "integer" },
+                            "to_y": { "type": "integer" },
+                            "to_z": { "type": "integer" },
+                            "block_type": { "type": "string" }
+                        },
+                        "required": ["from_x", "from_y", "from_z", "to_x", "to_y", "to_z", "block_type"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "add_block",
+                    "description": "Add a single block at a position.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "integer" },
+                            "y": { "type": "integer" },
+                            "z": { "type": "integer" },
+                            "block_type": { "type": "string" }
+                        },
+                        "required": ["x", "y", "z", "block_type"]
+                    }
+                }
+            }),
+        ];
+
+        let prompt = format!(
+            "Build the following: {}\n\nUse the add_box, add_line, and add_block tools to construct this building. Call each tool for every element you want to add. Be detailed and thorough.",
+            build
+        );
+
+        let (_text, tool_calls) = tracker.chat_completion_with_tools(
+            &model.model_name,
+            system,
+            &prompt,
+            tools.clone(),
+            None,
+            false,
+        )?;
+
+        tracker.record_tool_calls(&tool_calls, &tools);
+
+        let tool_calls_count = tool_calls.len();
+        let pass = tool_calls_count > 0;
+
+        Ok(Some(
+            TaskResult::new(
+                format!("task-{}", idx),
+                pass,
+                if pass { 1.0 } else { 0.0 },
+                vec![building_key.clone()],
+            )
+            .with_metadata(Some(serde_json::json!({
+                "building": building_key,
+                "tool_calls_count": tool_calls_count,
+            }))),
+        ))
+    }
+
+    fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
+        let raw = &b.raw;
+
+        let (total, valid) = {
+            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+                let total = per_task.len() as i64;
+                let valid = per_task
+                    .iter()
+                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count() as i64;
+                (total, valid)
+            } else {
+                (0, 0)
+            }
+        };
+
+        // Start with auto-populated scores (pass_rate, output_tokens, tool_call_*)
+        let mut scores = b.scores.clone();
+        // Add domain-specific scores on top
+        scores.insert(
+            "valid_buildings".to_string(),
+            Score::integer(valid, ScoreUnit::Count).higher_is_better(true),
+        );
+        scores.insert(
+            "total_buildings".to_string(),
+            Score::integer(total, ScoreUnit::Count),
+        );
+
+        let tc_valid = raw
+            .get("tool_calls_valid")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let tc_total = raw
+            .get("tool_calls_total")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        Ok(BenchmarkResult {
+            scores,
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![crate::reports::model::Diagnostic {
+                level: "info".to_string(),
+                message: format!(
+                    "Minebench (Tools): {} valid out of {}, tool calls: {} valid/{} total",
+                    valid, total, tc_valid, tc_total
+                ),
+            }],
+            raw: raw.clone(),
+        })
+    }
+}
+
 fn configured_buildings(config: &yaml_serde::Value) -> Result<Vec<(String, String)>> {
     if let Some(buildings) = config.get("buildings").and_then(|v| v.as_sequence()) {
         if buildings.is_empty() {

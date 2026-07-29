@@ -222,6 +222,7 @@ fn run_benchmark(
     loop {
         // Snapshot before the task
         let (prev_output, prev_thinking) = tracker.snapshot();
+        let (prev_tc_total, prev_tc_valid, prev_tc_invalid) = tracker.tool_call_snapshot();
 
         match benchmarks::execute_benchmark_one(bench_name, model, bench_cfg, &mut tracker) {
             Ok(Some(mut task_result)) => {
@@ -229,6 +230,13 @@ fn run_benchmark(
                 let (curr_output, curr_thinking) = tracker.snapshot();
                 task_result.output_tokens = curr_output - prev_output;
                 task_result.thinking_tokens = curr_thinking - prev_thinking;
+
+                // Annotate with per-task tool call delta from tracker
+                let (curr_tc_total, curr_tc_valid, curr_tc_invalid) = tracker.tool_call_snapshot();
+                task_result.tool_calls_total = curr_tc_total - prev_tc_total;
+                task_result.tool_calls_valid = curr_tc_valid - prev_tc_valid;
+                task_result.tool_calls_invalid = curr_tc_invalid - prev_tc_invalid;
+
                 task_results.push(task_result);
             }
             Ok(None) => {

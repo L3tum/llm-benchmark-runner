@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 pub mod aime;
 pub mod answer_classifier;
+pub mod base64;
 pub mod carwash;
 pub mod cnn_dailymail;
 pub mod coding_eval;
@@ -18,6 +19,7 @@ pub mod gpqa;
 pub mod halueval;
 pub mod harmbench;
 pub mod hdm_bench;
+pub mod hex;
 pub mod ifeval;
 pub mod kld;
 pub mod math500;
@@ -25,11 +27,14 @@ pub mod minebench;
 pub mod mmlu_pro;
 pub mod mmlu_pro_plus;
 pub mod mmlu_prox;
+pub mod morse_code;
 pub mod nq_open;
 pub mod race;
+pub mod reverse;
 pub mod squad_v2;
 pub mod stable_toolbench;
 pub mod supergpqa;
+pub mod svg_benchmarks;
 pub mod swe_bench;
 pub mod terminal_bench;
 pub mod tool_hallucination;
@@ -122,6 +127,50 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "carwash".to_string(),
             Box::new(carwash::CarwashBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "reverse".to_string(),
+            Box::new(reverse::ReverseBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "reverse_tools".to_string(),
+            Box::new(reverse::ReverseToolsBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "morse_code".to_string(),
+            Box::new(morse_code::MorseCodeBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "morse_code_tools".to_string(),
+            Box::new(morse_code::MorseCodeToolsBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "base64".to_string(),
+            Box::new(base64::Base64Benchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "base64_tools".to_string(),
+            Box::new(base64::Base64ToolsBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "hex".to_string(),
+            Box::new(hex::HexBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "hex_tools".to_string(),
+            Box::new(hex::HexToolsBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "svg_moonwalk".to_string(),
+            Box::new(svg_benchmarks::SvgMoonwalkBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "svg_bike".to_string(),
+            Box::new(svg_benchmarks::SvgBikeBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "minebench_tools".to_string(),
+            Box::new(minebench::MinebenchToolsBenchmark::default()) as Box<dyn Benchmark>,
         );
         map.insert(
             "ifeval".to_string(),

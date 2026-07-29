@@ -29,6 +29,7 @@ pub enum BenchmarkCategory {
     Translation,
     Safety,
     ToolUse,
+    StringManipulation,
     Other(String),
 }
 
@@ -48,6 +49,7 @@ impl BenchmarkCategory {
             Self::Translation => "Translation".to_string(),
             Self::Safety => "Safety".to_string(),
             Self::ToolUse => "Tool-Use".to_string(),
+            Self::StringManipulation => "String-Manipulation".to_string(),
             Self::Other(s) => s.clone(),
         }
     }
@@ -67,6 +69,7 @@ impl BenchmarkCategory {
             "Translation" => Self::Translation,
             "Safety" => Self::Safety,
             "Tool-Use" => Self::ToolUse,
+            "String-Manipulation" => Self::StringManipulation,
             other => Self::Other(other.to_string()),
         }
     }
@@ -304,16 +307,87 @@ impl BenchmarkResult {
         }
     }
 
+    /// Generate standard tool call scores from aggregated counts.
+    /// Returns: tool_calls_total, tool_calls_valid, tool_calls_invalid, tool_call_success_rate.
+    pub fn tool_call_scores(total: u64, valid: u64, invalid: u64) -> BTreeMap<String, Score> {
+        let mut scores = BTreeMap::new();
+        let success_rate = if total > 0 {
+            valid as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        scores.insert(
+            "tool_call_success".to_string(),
+            Score::float(success_rate, ScoreUnit::Percent).higher_is_better(true),
+        );
+        scores.insert(
+            "tool_calls_total".to_string(),
+            Score::integer(total as i64, ScoreUnit::Count),
+        );
+        scores.insert(
+            "tool_calls_valid".to_string(),
+            Score::integer(valid as i64, ScoreUnit::Count).higher_is_better(true),
+        );
+        scores.insert(
+            "tool_calls_invalid".to_string(),
+            Score::integer(invalid as i64, ScoreUnit::Count).higher_is_better(false),
+        );
+        scores
+    }
+
     /// Build a `BenchmarkResult` from a list of per-task results.
     /// Used by both the runner (execute_one path) and individual benchmarks (execute path).
+    /// Pre-populates common scores: pass_rate, output_tokens, thinking_tokens,
+    /// and tool_call_* metrics (when tool calls are present).
     pub fn from_task_results(task_results: Vec<TaskResult>) -> Self {
         let total = task_results.len() as i64;
         let passed = task_results.iter().filter(|t| t.passed).count() as i64;
         let total_output_tokens: u64 = task_results.iter().map(|t| t.output_tokens).sum();
         let total_thinking_tokens: u64 = task_results.iter().map(|t| t.thinking_tokens).sum();
+        let total_tool_calls: u64 = task_results.iter().map(|t| t.tool_calls_total).sum();
+        let total_tool_calls_valid: u64 = task_results.iter().map(|t| t.tool_calls_valid).sum();
+        let total_tool_calls_invalid: u64 = task_results.iter().map(|t| t.tool_calls_invalid).sum();
+
+        let mut scores = BTreeMap::new();
+
+        // Always include pass rate
+        let pass_rate = if total > 0 {
+            passed as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        scores.insert(
+            "pass_rate".to_string(),
+            Score::float(pass_rate, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+
+        // Include token counts when non-zero
+        if total_output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(total_output_tokens as i64, ScoreUnit::Tokens),
+            );
+        }
+        if total_thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(total_thinking_tokens as i64, ScoreUnit::Tokens),
+            );
+        }
+
+        // Auto-include tool call scores when tool calls were made
+        if total_tool_calls > 0 {
+            scores.extend(Self::tool_call_scores(
+                total_tool_calls,
+                total_tool_calls_valid,
+                total_tool_calls_invalid,
+            ));
+        }
 
         Self {
-            scores: BTreeMap::new(),
+            scores,
             breakdowns: BTreeMap::new(),
             error_classification: BTreeMap::new(),
             artifacts: vec![],
@@ -324,6 +398,9 @@ impl BenchmarkResult {
                 "passed_tasks": passed,
                 "output_tokens": total_output_tokens,
                 "thinking_tokens": total_thinking_tokens,
+                "tool_calls_total": total_tool_calls,
+                "tool_calls_valid": total_tool_calls_valid,
+                "tool_calls_invalid": total_tool_calls_invalid,
                 "per_task": task_results.iter().map(|t| serde_json::json!({
                     "task_id": t.task_id,
                     "passed": t.passed,
@@ -331,6 +408,9 @@ impl BenchmarkResult {
                     "categories": t.categories,
                     "output_tokens": t.output_tokens,
                     "thinking_tokens": t.thinking_tokens,
+                    "tool_calls_total": t.tool_calls_total,
+                    "tool_calls_valid": t.tool_calls_valid,
+                    "tool_calls_invalid": t.tool_calls_invalid,
                     "metadata": t.metadata,
                 })).collect::<Vec<_>>(),
             }),
@@ -340,6 +420,7 @@ impl BenchmarkResult {
 
 /// Per-task result returned by `Benchmark::execute_one()`.
 /// Token counts are populated by runner.rs from the TokenTracker, not by the benchmark itself.
+/// Tool call metrics are populated by runner.rs from the TokenTracker for _tools benchmarks.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskResult {
     pub task_id: String,
@@ -351,6 +432,12 @@ pub struct TaskResult {
     pub output_tokens: u64,
     /// Populated by runner.rs from TokenTracker delta
     pub thinking_tokens: u64,
+    /// Populated by runner.rs from TokenTracker delta (0 for non-tool benchmarks)
+    pub tool_calls_total: u64,
+    /// Populated by runner.rs from TokenTracker delta (0 for non-tool benchmarks)
+    pub tool_calls_valid: u64,
+    /// Populated by runner.rs from TokenTracker delta (0 for non-tool benchmarks)
+    pub tool_calls_invalid: u64,
     /// Optional per-task extras
     pub metadata: Option<Value>,
 }
@@ -369,6 +456,9 @@ impl TaskResult {
             categories,
             output_tokens: 0,
             thinking_tokens: 0,
+            tool_calls_total: 0,
+            tool_calls_valid: 0,
+            tool_calls_invalid: 0,
             metadata: None,
         }
     }

@@ -25,6 +25,8 @@ chrono = "0.4"
 async-trait = "0.1"  # for async trait methods
 csv = "1.3"
 flate2 = "1.0"
+base64 = "0.22"
+quick-xml = "0.41"
 slug = "0.1"
 ctrlc = "3.4"
 # No reports subcrate - it's a module under src/reports/

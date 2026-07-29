@@ -17,6 +17,3 @@ multiple-versions = "warn"
 
 [advisories]
 # Block crates with unresolved security advisories
-ignore = [
-    "RUSTSEC-2025-0119",  # number_prefix unmaintained (used by indicatif)
-]
