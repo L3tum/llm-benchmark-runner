@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use regex::Regex;
@@ -115,7 +115,7 @@ impl Benchmark for Math500Benchmark {
             items.len()
         );
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -128,7 +128,7 @@ impl Benchmark for Math500Benchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (q, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -164,7 +164,7 @@ impl Benchmark for Math500Benchmark {
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
+        use crate::shared::{BreakdownTable, Score, ScoreUnit};
 
         let (total, correct, _wrong, output_tokens, thinking_tokens) = {
             if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {

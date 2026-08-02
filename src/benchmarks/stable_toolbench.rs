@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::reports::model::{
+use crate::shared::{
     BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit, TaskResult,
 };
 use crate::token_tracker::TokenTracker;
@@ -23,6 +23,7 @@ struct StableToolBenchState {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // query_id kept for schema alignment
 struct SolvableQuery {
     #[serde(rename = "api_list")]
     api_list: Vec<ToolDefinition>,
@@ -39,6 +40,7 @@ struct SolvableQuery {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // category_name, method, template_response kept for schema alignment
 struct ToolDefinition {
     #[serde(default)]
     category_name: String,
@@ -59,6 +61,7 @@ struct ToolDefinition {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // default field kept for schema alignment
 struct ParamDef {
     #[serde(default)]
     name: String,
@@ -71,6 +74,7 @@ struct ParamDef {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // num_samples, subsets, categories reserved for future filtering
 struct StableToolBenchConfig {
     num_samples: Option<usize>,
     subsets: Option<Vec<String>>,
@@ -120,7 +124,7 @@ impl Benchmark for StableToolBenchBenchmark {
         // Download dataset
         let instances = download_dataset()?;
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.instances = filter_instances(instances, &subsets, &categories, num_samples);
         state.config = StableToolBenchConfig {
             num_samples,
@@ -143,7 +147,7 @@ impl Benchmark for StableToolBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -558,6 +562,7 @@ fn cache_dir() -> Result<PathBuf> {
 
 /// Per-instance evaluation results
 #[derive(Debug)]
+#[allow(dead_code)] // fields tracked for future detailed reporting
 struct InstanceResult {
     passed: bool,
     tool_selection_correct: bool,
@@ -726,84 +731,6 @@ fn tool_definition_to_json_schema(api: &ToolDefinition) -> serde_json::Value {
 
 fn normalize_api(api: &str) -> String {
     api.split('/').next_back().unwrap_or(api).to_lowercase()
-}
-
-/// Build BenchmarkResult from task results and instance results
-fn build_benchmark_result(
-    task_results: Vec<TaskResult>,
-    instance_results: &[InstanceResult],
-) -> Result<BenchmarkResult> {
-    let total = task_results.len() as i64;
-    let passed = task_results.iter().filter(|t| t.passed).count() as i64;
-    let total_output_tokens: u64 = task_results.iter().map(|t| t.output_tokens).sum();
-    let total_thinking_tokens: u64 = task_results.iter().map(|t| t.thinking_tokens).sum();
-
-    // Aggregate metrics
-    let total_tp: usize = instance_results.iter().map(|r| r.api_true_positives).sum();
-    let total_fp: usize = instance_results.iter().map(|r| r.api_false_positives).sum();
-    let total_fn: usize = instance_results.iter().map(|r| r.api_false_negatives).sum();
-
-    let precision = if total_tp + total_fp > 0 {
-        total_tp as f64 / (total_tp + total_fp) as f64
-    } else {
-        0.0
-    };
-    let recall = if total_tp + total_fn > 0 {
-        total_tp as f64 / (total_tp + total_fn) as f64
-    } else {
-        0.0
-    };
-    let f1 = if precision + recall > 0.0 {
-        2.0 * precision * recall / (precision + recall)
-    } else {
-        0.0
-    };
-    let param_completeness = if !instance_results.is_empty() {
-        instance_results.iter().filter(|r| r.param_complete).count() as f64
-            / instance_results.len() as f64
-    } else {
-        0.0
-    };
-    let tool_selection_accuracy = if total > 0 {
-        instance_results
-            .iter()
-            .filter(|r| r.tool_selection_correct)
-            .count() as f64
-            / total as f64
-    } else {
-        0.0
-    };
-
-    Ok(BenchmarkResult {
-        scores: BTreeMap::new(),
-        breakdowns: BTreeMap::new(),
-        error_classification: BTreeMap::new(),
-        artifacts: vec![],
-        diagnostics: vec![],
-        raw: serde_json::json!({
-            "pass_rate": if total > 0 { passed as f64 / total as f64 } else { 0.0 },
-            "simulated_pass_rate": if total > 0 { passed as f64 / total as f64 } else { 0.0 },
-            "tool_selection_accuracy": tool_selection_accuracy,
-            "api_precision": precision,
-            "api_recall": recall,
-            "api_f1": f1,
-            "param_completeness": param_completeness,
-            "total_instances": total,
-            "passed_instances": passed,
-            "output_tokens": total_output_tokens,
-            "thinking_tokens": total_thinking_tokens,
-            // Emit per_task format (matching from_task_results) so to_report_result
-            // doesn't need separate code paths for execute() vs execute_one().
-            "per_task": task_results.iter().map(|t| serde_json::json!({
-                "passed": t.passed,
-                "score": t.score,
-                "categories": t.categories,
-                "output_tokens": t.output_tokens,
-                "thinking_tokens": t.thinking_tokens,
-                "metadata": t.metadata,
-            })).collect::<Vec<_>>(),
-        }),
-    })
 }
 
 #[cfg(test)]

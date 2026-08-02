@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::{self, Model};
 use crate::docker_runner::{DockerRunConfig, DockerRunner};
-use crate::reports::model::{
+use crate::shared::{
     BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit, TaskResult,
 };
 use crate::token_tracker::TokenTracker;
@@ -24,6 +24,7 @@ struct TerminalBenchState {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // task field kept for schema alignment
 struct TerminalBenchTask {
     #[serde(flatten)]
     metadata: TaskMetadata,
@@ -42,6 +43,7 @@ struct TaskMetadata {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // description and keywords kept for schema alignment
 struct TaskInfo {
     #[serde(default)]
     name: String,
@@ -52,12 +54,14 @@ struct TaskInfo {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // tags field kept for schema alignment
 struct TaskDetails {
     #[serde(default = "default_difficulty")]
     difficulty: String,
     #[serde(default = "default_category")]
     category: String,
     #[serde(default)]
+    #[allow(dead_code)] // kept for schema completeness
     tags: Vec<String>,
 }
 
@@ -70,16 +74,20 @@ fn default_category() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // resource fields kept for schema alignment
 struct EnvConfig {
     #[serde(default)]
     docker_image: String,
     #[serde(default)]
+    #[allow(dead_code)] // kept for schema completeness
     cpus: u64,
     #[serde(default = "default_memory")]
     memory_mb: u64,
     #[serde(default = "default_storage")]
+    #[allow(dead_code)] // kept for schema completeness
     storage_mb: u64,
     #[serde(default)]
+    #[allow(dead_code)] // kept for schema completeness
     gpus: u64,
     #[serde(default)]
     allow_internet: bool,
@@ -94,10 +102,13 @@ fn default_storage() -> u64 {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // num_samples and categories reserved for future filtering
 struct TerminalBenchConfig {
+    #[allow(dead_code)] // kept for future sampling support
     num_samples: Option<usize>,
     max_iterations: usize,
     timeout_secs: u64,
+    #[allow(dead_code)] // kept for future filtering support
     categories: Option<Vec<String>>,
 }
 
@@ -146,7 +157,7 @@ impl Benchmark for TerminalBenchBenchmark {
         // Download/verify tasks
         let tasks = download_tasks()?;
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.tasks = filter_tasks(tasks, &categories, num_samples);
         state.config = TerminalBenchConfig {
             num_samples,
@@ -167,7 +178,7 @@ impl Benchmark for TerminalBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (task, cfg, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.tasks.len() {
                 return Ok(None);
             }
@@ -534,11 +545,15 @@ fn execute_single_task(
             .as_ref()
             .map(|e| e.allow_internet)
             .unwrap_or(false),
-        read_only_root: false,
-        tmpfs: vec!["/tmp:rw,noexec,nosuid,size=64m".to_string()],
-        cap_drop_all: false,
+        read_only_root: true,
+        tmpfs: vec![
+            "/tmp:rw,noexec,nosuid,size=64m".to_string(),
+            "/workspace:rw,noexec,nosuid,size=256m".to_string(),
+            "/tests:rw,nosuid,size=64m".to_string(),
+        ],
+        cap_drop_all: true,
         no_new_privileges: true,
-        pids_limit: None,
+        pids_limit: Some(128),
         memory: Some(format!(
             "{}m",
             task.environment
@@ -761,11 +776,6 @@ fn validate_task(container: &str, task_name: &str, cache_dir: &Path) -> Result<b
         "cat /logs/verifier/reward.txt 2>/dev/null || echo '0'",
     )?;
     Ok(reward.trim() == "1")
-}
-
-/// Build BenchmarkResult from task results (delegates to shared helper)
-fn build_benchmark_result(task_results: Vec<TaskResult>) -> Result<BenchmarkResult> {
-    Ok(BenchmarkResult::from_task_results(task_results))
 }
 
 #[cfg(test)]

@@ -24,6 +24,9 @@ benchmarks:
   # - minebench
   # Quick sanity check:
   # - carwash
+  # Fictional/efficient language translation:
+  # - fictional_language
+  # - efficient_language
   # Instruction-following evaluation:
   # - ifeval
   # Safety evaluation (base harmfulness, no Docker):
@@ -32,6 +35,8 @@ benchmarks:
   # - humaneval_plus
   # - humaneval
   # - mbpp_plus
+  # Multi-language coding benchmark (HumanEval translated to 30+ languages):
+  # - multipl_e
   # Repository patch benchmarks:
   # - swebench_verified
   # - swebench_pro
@@ -49,7 +54,9 @@ docker:
     swebench_harness: llm-benchmark-runner/swebench-harness:latest
   build_images: true
   max_workers: 1
-  mount_docker_socket: true
+  # SECURITY: Default is false. Mounting the Docker socket gives containers
+  # equivalent-to-root access to the host. Only enable if you understand the risk.
+  mount_docker_socket: false
   docker_socket_path: /var/run/docker.sock
   # Required when this runner itself runs in Docker with the host Docker socket mounted:
   # host_repo_path: /host/path/to/llm-benchmark-runner
@@ -118,6 +125,22 @@ benchmark:
     tasksets:
       humaneval_plus: ~
     num_samples: 10
+  fictional_language:
+    # Fictional language translation benchmark.
+    # Three difficulty levels (easy, medium, hard) scored independently + overall.
+    # num_samples: 30  # default: all 30 instances (10 per difficulty level)
+  efficient_language:
+    # Efficient language translation benchmark (symbol substitution).
+    # Three difficulty levels (easy, medium, hard) scored independently + overall.
+    # num_samples: 30  # default: all 30 instances (10 per difficulty level)
+  multipl_e:
+    # MultiPL-E: HumanEval translated to 30+ programming languages.
+    # Requires Docker for code evaluation.
+    # Default languages: all available (31 languages). Filter to a subset if desired:
+    # languages: [cs, rs, go, java, js, ts, cpp, py]
+    # num_samples: 20  # per language
+    # timeout_secs: 30  # per-task evaluation timeout
+    # Uses ghcr.io/nuprl/multipl-e-evaluation Docker image for evaluation.
 
 # Comparison groups for generating filtered reports.
 # Each comparison produces a standalone benchmark_report.html file containing only the listed models.

@@ -1,9 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::reports::model::{
-    Artifact, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult,
-};
+use crate::shared::{Artifact, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -81,7 +79,7 @@ impl Benchmark for SvgMoonwalkBenchmark {
         let output_dir =
             config::extract_string(config, "output_dir").unwrap_or_else(|| "output".to_string());
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             state.output_dir = PathBuf::from(output_dir);
             fs::create_dir_all(&state.output_dir)?;
         }
@@ -95,7 +93,7 @@ impl Benchmark for SvgMoonwalkBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let should_execute = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.done {
                 return Ok(None);
             }
@@ -111,7 +109,12 @@ impl Benchmark for SvgMoonwalkBenchmark {
 
         let svg_content = extract_svg(&response);
 
-        let output_dir = self.state.lock().unwrap().output_dir.clone();
+        let output_dir = self
+            .state
+            .lock()
+            .expect(crate::shared::MUTEX_PANIC_MSG)
+            .output_dir
+            .clone();
         let svg_path = output_dir.join("flamingo_moonwalk.svg");
         fs::write(&svg_path, &svg_content)?;
 
@@ -227,7 +230,7 @@ impl Benchmark for SvgBikeBenchmark {
         let output_dir =
             config::extract_string(config, "output_dir").unwrap_or_else(|| "output".to_string());
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             state.output_dir = PathBuf::from(output_dir);
             fs::create_dir_all(&state.output_dir)?;
         }
@@ -241,7 +244,7 @@ impl Benchmark for SvgBikeBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let should_execute = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.done {
                 return Ok(None);
             }
@@ -257,7 +260,12 @@ impl Benchmark for SvgBikeBenchmark {
 
         let svg_content = extract_svg(&response);
 
-        let output_dir = self.state.lock().unwrap().output_dir.clone();
+        let output_dir = self
+            .state
+            .lock()
+            .expect(crate::shared::MUTEX_PANIC_MSG)
+            .output_dir
+            .clone();
         let svg_path = output_dir.join("pelican_bike.svg");
         fs::write(&svg_path, &svg_content)?;
 

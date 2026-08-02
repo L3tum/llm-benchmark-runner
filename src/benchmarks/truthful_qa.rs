@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use regex::Regex;
@@ -151,7 +151,7 @@ impl Benchmark for TruthfulQABenchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let dataset = load_truthfulqa();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = dataset.multiple_choice.mc1;
         state.current_idx = 0;
         Ok(())
@@ -164,7 +164,7 @@ impl Benchmark for TruthfulQABenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -356,7 +356,7 @@ impl Benchmark for TruthfulQAMC2Benchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let dataset = load_truthfulqa();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = dataset.multiple_choice.mc2;
         state.current_idx = 0;
         Ok(())
@@ -369,7 +369,7 @@ impl Benchmark for TruthfulQAMC2Benchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

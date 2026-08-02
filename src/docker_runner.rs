@@ -12,6 +12,7 @@ pub struct DockerMount {
 }
 
 impl DockerMount {
+    #[allow(dead_code)] // reserved for mount configuration
     pub fn readonly(source: impl Into<PathBuf>, target: impl Into<String>) -> Self {
         Self {
             source: source.into(),
@@ -30,6 +31,7 @@ impl DockerMount {
         }
     }
 
+    #[allow(dead_code)] // reserved for direct mount configuration
     pub fn direct_readwrite(source: impl Into<PathBuf>, target: impl Into<String>) -> Self {
         Self {
             source: source.into(),
@@ -206,8 +208,21 @@ impl DockerRunner {
         Ok(container_name)
     }
 
-    /// Execute a command in a running container and return stdout.
+    /// Execute a trusted command in a running container and return stdout.
+    ///
+    /// # Security
+    /// The `command` is passed to `sh -c`. Only call with sanitized, validated
+    /// input. Never pass unsanitized user or LLM data directly. The caller
+    /// must enforce length limits (max 4 KB) and input validation.
     pub fn exec(container: &str, command: &str) -> Result<String> {
+        const MAX_CMD_LEN: usize = 4 * 1024;
+        if command.len() > MAX_CMD_LEN {
+            return Err(anyhow::anyhow!(
+                "Command exceeds maximum length ({}/{} bytes)",
+                command.len(),
+                MAX_CMD_LEN
+            ));
+        }
         let output = Command::new("docker")
             .arg("exec")
             .arg(container)

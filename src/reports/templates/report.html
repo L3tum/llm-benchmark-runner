@@ -437,7 +437,7 @@
                                     </td>
                                 </tr>
                                 <!-- Using <template> to safely embed raw JSON (avoids </script> breaking the tag) -->
-                                <template id="data-{{ model | slugify }}-{{ building.name | slugify }}">{{ building.json_content | safe }}</template>
+                                <template id="data-{{ model | slugify }}-{{ building.name | slugify }}">{{ building.json_content }}</template>
                                 {% endfor %}
                                 {% endfor %}
                             </tbody>

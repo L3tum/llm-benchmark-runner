@@ -2,8 +2,9 @@ use crate::benchmarks::mmlu_pro::MmluProBenchmark;
 use crate::benchmarks::Benchmark;
 use crate::client::LogprobEntry;
 use crate::config::Model;
-use crate::reports::model::{
-    BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit, TaskResult, TestAggregate,
+use crate::shared::{
+    BenchmarkCategory, BenchmarkResult, BreakdownTable, Diagnostic, Score, ScoreUnit, TaskResult,
+    TestAggregate,
 };
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
@@ -106,7 +107,6 @@ impl Benchmark for KldBenchmark {
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        use crate::reports::model::Diagnostic;
 
         let num_prompts = raw.get("num_prompts").and_then(|v| v.as_i64()).unwrap_or(0);
         let output_tokens = raw
@@ -155,7 +155,6 @@ impl Benchmark for KldBenchmark {
 
     fn to_report_aggregate(&self, b: &BenchmarkResult) -> Result<Option<TestAggregate>> {
         let raw = &b.raw;
-        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
 
         // Extract pairwise KLD scores
         if let Some(pairwise) = raw.get("pairwise").and_then(|v| v.as_object()) {
@@ -233,7 +232,7 @@ impl Benchmark for KldBenchmark {
             return Err(anyhow::anyhow!("No prompts loaded for KLD"));
         }
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.prompts = prompts;
         state.current_idx = 0;
         Ok(())
@@ -246,7 +245,7 @@ impl Benchmark for KldBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (prompt, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.prompts.len() {
                 return Ok(None);
             }

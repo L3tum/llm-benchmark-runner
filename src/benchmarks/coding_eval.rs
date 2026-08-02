@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
@@ -101,6 +101,7 @@ const MBPP_PLUS_URL: &str =
     "https://github.com/evalplus/mbppplus_release/releases/download/v0.2.0/MbppPlus.jsonl.gz";
 const HUMAN_EVAL_URL: &str =
     "https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz";
+#[allow(dead_code)] // used for Docker-based coding benchmarks
 const DEFAULT_DOCKER_IMAGE: &str = "python:3.12";
 
 fn download_taskset(taskset: &TasksetConfig) -> Result<PathBuf> {
@@ -247,6 +248,7 @@ impl TaskType {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // language and tasks_path reserved for future multi-language support
 struct TasksetConfig {
     name: String,
     task_type: TaskType,
@@ -255,6 +257,7 @@ struct TasksetConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // pass2/pass3/multi-language/host-repo fields reserved for full harness support
 struct CodingEvalConfig {
     tasksets: Vec<TasksetConfig>,
     num_samples: Option<usize>,
@@ -266,6 +269,7 @@ struct CodingEvalConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // struct kept for deserialization schema; not all fields consumed
 struct CodingTask {
     task_id: String,
     prompt: String,
@@ -281,37 +285,7 @@ struct CodingTask {
     #[serde(default)]
     atol: Option<f64>,
     #[serde(default)]
-    #[allow(dead_code)]
     assertion: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct HarnessFiles {
-    test_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct DockerResult {
-    passed: bool,
-    timed_out: bool,
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    error_summary: String,
-}
-
-#[derive(Debug, Clone)]
-struct AttemptOutcome {
-    attempt: usize,
-    skipped: bool,
-    passed: bool,
-    timed_out: bool,
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    error_summary: String,
-    output_tokens: u64,
-    thinking_tokens: u64,
 }
 
 fn preset_config(config: &yaml_serde::Value, name: &str, task_type: TaskType) -> yaml_serde::Value {
@@ -365,7 +339,7 @@ impl Benchmark for CodingEvalBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("Coding Eval: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -379,7 +353,7 @@ impl Benchmark for CodingEvalBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -512,7 +486,7 @@ impl Benchmark for HumanEvalBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("HumanEval: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -526,7 +500,7 @@ impl Benchmark for HumanEvalBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -589,7 +563,7 @@ impl Benchmark for HumanEvalPlusBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("HumanEval+: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -603,7 +577,7 @@ impl Benchmark for HumanEvalPlusBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -666,7 +640,7 @@ impl Benchmark for MbppPlusBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("MBPP+: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -680,7 +654,7 @@ impl Benchmark for MbppPlusBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

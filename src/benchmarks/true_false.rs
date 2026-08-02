@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
@@ -90,7 +90,7 @@ impl Benchmark for TrueFalseBenchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let items = load_true_false_dataset();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -103,7 +103,7 @@ impl Benchmark for TrueFalseBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

@@ -1,0 +1,678 @@
+//! Shared types used by both benchmarks and reports modules.
+//!
+//! These types sit in their own module to avoid a dependency cycle:
+//! benchmarks imports from reports (for scoring) and reports imports from
+//! benchmarks (for category enumeration). Placing shared types here breaks
+//! the cycle.
+//!
+//! If this module exceeds 20 types, consider splitting into
+//! sub-modules (`types/`, `scores/`, `results/`).
+
+use crate::error_classes::WrongAnswerClass;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+// Re-export commonly used types
+pub use serde_json::Value as JsonValue;
+
+/// Panic message used when a Mutex protecting benchmark state is poisoned.
+pub const MUTEX_PANIC_MSG: &str =
+    "mutex poisoned on benchmark state — thread panicked during execution";
+
+/// Unique name for a benchmark (e.g., "mmlu_pro", "gpqa")
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub struct TestName(pub String);
+
+impl TestName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+}
+
+/// Top-level benchmark category for grouping and display.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub enum BenchmarkCategory {
+    Knowledge,
+    Math,
+    ShortContextCoding,
+    LongContextCoding,
+    Creative,
+    Reasoning,
+    Research,
+    Similarity,
+    InstructionFollowing,
+    Hallucination,
+    Translation,
+    Safety,
+    ToolUse,
+    StringManipulation,
+    Other(String),
+}
+
+impl BenchmarkCategory {
+    pub fn display(&self) -> String {
+        match self {
+            Self::Knowledge => "Knowledge".to_string(),
+            Self::Math => "Math".to_string(),
+            Self::ShortContextCoding => "Short-Context-Coding".to_string(),
+            Self::LongContextCoding => "Long-Context-Coding".to_string(),
+            Self::Creative => "Creative".to_string(),
+            Self::Reasoning => "Reasoning".to_string(),
+            Self::Research => "Research".to_string(),
+            Self::Similarity => "Similarity".to_string(),
+            Self::InstructionFollowing => "Instruction-Following".to_string(),
+            Self::Hallucination => "Hallucination".to_string(),
+            Self::Translation => "Translation".to_string(),
+            Self::Safety => "Safety".to_string(),
+            Self::ToolUse => "Tool-Use".to_string(),
+            Self::StringManipulation => "String-Manipulation".to_string(),
+            Self::Other(s) => s.clone(),
+        }
+    }
+}
+
+impl BenchmarkCategory {
+    /// Parse a display name back into a `BenchmarkCategory`.
+    /// Unknown strings are wrapped in `Other(String)`.
+    #[allow(dead_code)] // Utility for parsing serialized categories from disk; designed for report deserialization round-trip.
+    pub fn from_display_name(s: &str) -> Self {
+        match s {
+            "Knowledge" => Self::Knowledge,
+            "Math" => Self::Math,
+            "Short-Context-Coding" => Self::ShortContextCoding,
+            "Long-Context-Coding" => Self::LongContextCoding,
+            "Creative" => Self::Creative,
+            "Reasoning" => Self::Reasoning,
+            "Research" => Self::Research,
+            "Similarity" => Self::Similarity,
+            "Instruction-Following" => Self::InstructionFollowing,
+            "Hallucination" => Self::Hallucination,
+            "Translation" => Self::Translation,
+            "Safety" => Self::Safety,
+            "Tool-Use" => Self::ToolUse,
+            "String-Manipulation" => Self::StringManipulation,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+/// Numeric or textual value for a score metric.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ScoreValue {
+    Float(f64),
+    Integer(i64),
+    Bool(bool),
+    Text(String),
+    Missing,
+}
+
+/// Unit of measurement for a score.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub enum ScoreUnit {
+    Percent,
+    Count,
+    Tokens,
+    Seconds,
+    Ratio,
+    Kld,
+    Text,
+    None,
+}
+
+impl ScoreUnit {
+    /// Returns a human-readable unit string for display (e.g., "bits" for KLD).
+    pub fn display(&self) -> &'static str {
+        match self {
+            Self::Percent => "%",
+            Self::Count => "",
+            Self::Tokens => "tokens",
+            Self::Seconds => "s",
+            Self::Ratio => "",
+            Self::Kld => "bits",
+            Self::Text => "",
+            Self::None => "",
+        }
+    }
+}
+
+/// A single metric score, with formatting hints and directionality.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Score {
+    pub value: ScoreValue,
+    pub unit: ScoreUnit,
+    pub display: Option<String>,
+    pub higher_is_better: Option<bool>,
+    pub primary: bool,
+}
+
+impl Score {
+    pub fn float(value: f64, unit: ScoreUnit) -> Self {
+        Self {
+            value: ScoreValue::Float(value),
+            unit,
+            display: None,
+            higher_is_better: None,
+            primary: false,
+        }
+    }
+
+    pub fn integer(value: i64, unit: ScoreUnit) -> Self {
+        Self {
+            value: ScoreValue::Integer(value),
+            unit,
+            display: None,
+            higher_is_better: None,
+            primary: false,
+        }
+    }
+
+    pub fn text(value: String) -> Self {
+        Self {
+            value: ScoreValue::Text(value),
+            unit: ScoreUnit::Text,
+            display: None,
+            higher_is_better: None,
+            primary: false,
+        }
+    }
+
+    pub fn missing() -> Self {
+        Self {
+            value: ScoreValue::Missing,
+            unit: ScoreUnit::None,
+            display: Some("–".into()),
+            higher_is_better: None,
+            primary: false,
+        }
+    }
+
+    /// Create a boolean score (e.g., pass/fail).
+    pub fn bool(value: bool) -> Self {
+        Self {
+            value: ScoreValue::Bool(value),
+            unit: ScoreUnit::None,
+            display: None,
+            higher_is_better: None,
+            primary: false,
+        }
+    }
+
+    /// Mark this score as the primary metric.
+    #[must_use]
+    pub fn primary(mut self, v: bool) -> Self {
+        self.primary = v;
+        self
+    }
+
+    /// Indicate whether higher is better.
+    #[must_use]
+    pub fn higher_is_better(mut self, v: bool) -> Self {
+        self.higher_is_better = Some(v);
+        self
+    }
+
+    /// Set a pre-formatted display string.
+    #[must_use]
+    pub fn display(mut self, s: String) -> Self {
+        self.display = Some(s);
+        self
+    }
+
+    /// Display value as percent if primary, otherwise as raw, appending units when appropriate.
+    pub fn display_value(&self) -> String {
+        if let Some(ref d) = self.display {
+            d.clone()
+        } else {
+            let val_str = self.value.display();
+            // Append unit indicator if it's not percent (which already has %) and not a text/count type
+            match &self.unit {
+                ScoreUnit::Kld => format!("{} bits", val_str),
+                ScoreUnit::Tokens => format!("{} tokens", val_str),
+                _ => val_str,
+            }
+        }
+    }
+}
+
+impl ScoreValue {
+    pub fn display(&self) -> String {
+        match self {
+            ScoreValue::Float(v) => format!("{:.1}", v),
+            ScoreValue::Integer(v) => v.to_string(),
+            ScoreValue::Bool(v) => {
+                if *v {
+                    "✓".to_string()
+                } else {
+                    "✗".to_string()
+                }
+            }
+            ScoreValue::Text(t) => t.clone(),
+            ScoreValue::Missing => "–".to_string(),
+        }
+    }
+}
+
+// Manual PartialEq/PartialOrd because f64 doesn't implement Eq/Ord
+impl PartialEq for ScoreValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::Integer(a), Self::Integer(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Missing, Self::Missing) => true,
+            _ => false,
+        }
+    }
+}
+
+impl PartialOrd for ScoreValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Self::Float(a), Self::Float(b)) => a.partial_cmp(b),
+            (Self::Integer(a), Self::Integer(b)) => a.partial_cmp(b),
+            (Self::Bool(a), Self::Bool(b)) => a.partial_cmp(b),
+            (Self::Text(a), Self::Text(b)) => a.partial_cmp(b),
+            (Self::Missing, Self::Missing) => Some(std::cmp::Ordering::Equal),
+            _ => None,
+        }
+    }
+}
+
+/// A breakdown table (e.g., per-subject accuracy).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BreakdownTable {
+    pub title: String,
+    pub rows: BTreeMap<String, BTreeMap<String, Score>>,
+}
+
+/// An artifact associated with a benchmark run (file, URL, etc.).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Artifact {
+    pub label: String,
+    pub path: String,
+    pub kind: String,
+}
+
+/// A diagnostic message (warning, error).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub level: String,
+    pub message: String,
+}
+
+/// Normalized benchmark result with generic scores and optional breakdowns.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BenchmarkResult {
+    /// Generic metrics usable by any report generator.
+    pub scores: BTreeMap<String, Score>,
+    /// Optional structured benchmark-specific tables.
+    pub breakdowns: BTreeMap<String, BreakdownTable>,
+    /// Per-error-class breakdown keyed by the enum (used by all benchmarks for error classification).
+    pub error_classification: BTreeMap<WrongAnswerClass, i64>,
+    pub artifacts: Vec<Artifact>,
+    pub diagnostics: Vec<Diagnostic>,
+    /// Raw benchmark payload for backwards compatibility and custom renderers.
+    pub raw: Value,
+}
+
+impl BenchmarkResult {
+    pub fn empty() -> Self {
+        Self {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: Value::Null,
+        }
+    }
+
+    /// Generate standard tool call scores from aggregated counts.
+    /// Returns: tool_calls_total, tool_calls_valid, tool_calls_invalid, tool_call_success_rate.
+    pub fn tool_call_scores(total: u64, valid: u64, invalid: u64) -> BTreeMap<String, Score> {
+        let mut scores = BTreeMap::new();
+        let success_rate = if total > 0 {
+            valid as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        scores.insert(
+            "tool_call_success".to_string(),
+            Score::float(success_rate, ScoreUnit::Percent).higher_is_better(true),
+        );
+        scores.insert(
+            "tool_calls_total".to_string(),
+            Score::integer(total as i64, ScoreUnit::Count),
+        );
+        scores.insert(
+            "tool_calls_valid".to_string(),
+            Score::integer(valid as i64, ScoreUnit::Count).higher_is_better(true),
+        );
+        scores.insert(
+            "tool_calls_invalid".to_string(),
+            Score::integer(invalid as i64, ScoreUnit::Count).higher_is_better(false),
+        );
+        scores
+    }
+
+    /// Build a `BenchmarkResult` from a list of per-task results.
+    /// Used by both the runner (execute_one path) and individual benchmarks (execute path).
+    /// Pre-populates common scores: pass_rate, output_tokens, thinking_tokens,
+    /// and tool_call_* metrics (when tool calls are present).
+    pub fn from_task_results(task_results: Vec<TaskResult>) -> Self {
+        // Single-pass aggregation
+        let total = task_results.len() as i64;
+        let mut passed = 0i64;
+        let mut total_output_tokens = 0u64;
+        let mut total_thinking_tokens = 0u64;
+        let mut total_tool_calls = 0u64;
+        let mut total_tool_calls_valid = 0u64;
+        let mut total_tool_calls_invalid = 0u64;
+        for tr in &task_results {
+            if tr.passed {
+                passed += 1;
+            }
+            total_output_tokens += tr.output_tokens;
+            total_thinking_tokens += tr.thinking_tokens;
+            total_tool_calls += tr.tool_calls_total;
+            total_tool_calls_valid += tr.tool_calls_valid;
+            total_tool_calls_invalid += tr.tool_calls_invalid;
+        }
+
+        let mut scores = BTreeMap::new();
+
+        // Always include pass rate
+        let pass_rate = if total > 0 {
+            passed as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        scores.insert(
+            "pass_rate".to_string(),
+            Score::float(pass_rate, ScoreUnit::Percent)
+                .primary(true)
+                .higher_is_better(true),
+        );
+
+        // Include token counts when non-zero
+        if total_output_tokens > 0 {
+            scores.insert(
+                "output_tokens".to_string(),
+                Score::integer(total_output_tokens as i64, ScoreUnit::Tokens),
+            );
+        }
+        if total_thinking_tokens > 0 {
+            scores.insert(
+                "thinking_tokens".to_string(),
+                Score::integer(total_thinking_tokens as i64, ScoreUnit::Tokens),
+            );
+        }
+
+        // Auto-include tool call scores when tool calls were made
+        if total_tool_calls > 0 {
+            scores.extend(Self::tool_call_scores(
+                total_tool_calls,
+                total_tool_calls_valid,
+                total_tool_calls_invalid,
+            ));
+        }
+
+        Self {
+            scores,
+            breakdowns: BTreeMap::new(),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: serde_json::json!({
+                "pass_rate": if total > 0 { passed as f64 / total as f64 } else { 0.0 },
+                "total_tasks": total,
+                "passed_tasks": passed,
+                "output_tokens": total_output_tokens,
+                "thinking_tokens": total_thinking_tokens,
+                "tool_calls_total": total_tool_calls,
+                "tool_calls_valid": total_tool_calls_valid,
+                "tool_calls_invalid": total_tool_calls_invalid,
+                "per_task": task_results.iter().map(|t| serde_json::json!({
+                    "task_id": t.task_id,
+                    "passed": t.passed,
+                    "score": t.score,
+                    "categories": t.categories,
+                    "output_tokens": t.output_tokens,
+                    "thinking_tokens": t.thinking_tokens,
+                    "tool_calls_total": t.tool_calls_total,
+                    "tool_calls_valid": t.tool_calls_valid,
+                    "tool_calls_invalid": t.tool_calls_invalid,
+                    "metadata": t.metadata,
+                })).collect::<Vec<_>>(),
+            }),
+        }
+    }
+}
+
+/// Per-task result returned by `Benchmark::execute_one()`.
+/// Token counts are populated by runner.rs from the TokenTracker, not by the benchmark itself.
+/// Tool call metrics are populated by runner.rs from the TokenTracker for _tools benchmarks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskResult {
+    pub task_id: String,
+    pub passed: bool,
+    pub score: f64,
+    /// Categories for breakdown tables (e.g., `["data-processing", "easy"]`)
+    pub categories: Vec<String>,
+    /// Populated by runner.rs from TokenTracker delta
+    pub output_tokens: u64,
+    /// Populated by runner.rs from TokenTracker delta
+    pub thinking_tokens: u64,
+    /// Populated by runner.rs from TokenTracker delta (0 for non-tool benchmarks)
+    pub tool_calls_total: u64,
+    /// Populated by runner.rs from TokenTracker delta (0 for non-tool benchmarks)
+    pub tool_calls_valid: u64,
+    /// Populated by runner.rs from TokenTracker delta (0 for non-tool benchmarks)
+    pub tool_calls_invalid: u64,
+    /// Optional per-task extras
+    pub metadata: Option<Value>,
+}
+
+impl TaskResult {
+    pub fn new(
+        task_id: impl Into<String>,
+        passed: bool,
+        score: f64,
+        categories: Vec<String>,
+    ) -> Self {
+        Self {
+            task_id: task_id.into(),
+            passed,
+            score,
+            categories,
+            output_tokens: 0,
+            thinking_tokens: 0,
+            tool_calls_total: 0,
+            tool_calls_valid: 0,
+            tool_calls_invalid: 0,
+            metadata: None,
+        }
+    }
+
+    pub fn with_metadata(mut self, metadata: Option<Value>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+}
+
+/// Aggregate per-test results (pairwise comparisons, global summaries).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TestAggregate {
+    pub scores: BTreeMap<String, Score>,
+    pub breakdowns: BTreeMap<String, BreakdownTable>,
+    pub raw: Value,
+}
+
+// ---- Difficulty and TranslationState from translation_benchmark ----
+
+/// Difficulty level for translation benchmark instances.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Difficulty {
+    Easy,
+    Medium,
+    Hard,
+}
+
+impl Difficulty {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Easy => "easy",
+            Self::Medium => "medium",
+            Self::Hard => "hard",
+        }
+    }
+}
+
+/// Shared state for translation benchmarks.
+///
+/// Holds a list of instances and tracks the current execution index.
+/// Uses `Mutex` for interior mutability so that `execute_one` can take `&self`.
+#[derive(Clone)]
+pub struct TranslationState<T> {
+    pub instances: Vec<T>,
+    pub current_idx: usize,
+    /// Inner test index for instances with multiple tests.
+    pub test_idx: usize,
+}
+
+impl<T> TranslationState<T> {
+    pub fn new(instances: Vec<T>) -> Self {
+        Self {
+            instances,
+            current_idx: 0,
+            test_idx: 0,
+        }
+    }
+}
+
+impl<T> Default for TranslationState<T> {
+    fn default() -> Self {
+        Self {
+            instances: Vec::new(),
+            current_idx: 0,
+            test_idx: 0,
+        }
+    }
+}
+
+/// Wrap a prompt value in XML fence tags to mitigate prompt injection attacks.
+/// Example: `fence_prompt_value("hello")` → `"<value>hello</value>"`
+pub fn fence_prompt_value(value: &str) -> String {
+    format!("<value>{}</value>", value)
+}
+
+#[cfg(test)]
+mod fence_prompt_value_tests {
+    use super::*;
+
+    #[test]
+    fn fence_prompt_value_wraps_correctly() {
+        assert_eq!(fence_prompt_value("hello"), "<value>hello</value>");
+    }
+
+    #[test]
+    fn fence_prompt_value_empty() {
+        assert_eq!(fence_prompt_value(""), "<value></value>");
+    }
+
+    #[test]
+    fn fence_prompt_value_with_html_chars() {
+        assert_eq!(
+            fence_prompt_value("<script>alert('xss')</script>"),
+            "<value><script>alert('xss')</script></value>"
+        );
+    }
+}
+
+#[cfg(test)]
+mod from_task_results_tests {
+    use super::*;
+
+    fn pass_result(id: &str) -> TaskResult {
+        TaskResult::new(id, true, 1.0, vec![])
+    }
+    fn fail_result(id: &str) -> TaskResult {
+        TaskResult::new(id, false, 0.0, vec![])
+    }
+
+    #[test]
+    fn from_task_results_empty() {
+        let result = BenchmarkResult::from_task_results(Vec::new());
+        assert_eq!(
+            result.scores.get("pass_rate").unwrap().value,
+            ScoreValue::Float(0.0)
+        );
+        assert!(!result.scores.contains_key("output_tokens"));
+        assert!(!result.scores.contains_key("tool_call_success"));
+    }
+
+    #[test]
+    fn from_task_results_single_pass() {
+        let result = BenchmarkResult::from_task_results(vec![pass_result("t1")]);
+        assert_eq!(
+            result.scores.get("pass_rate").unwrap().value,
+            ScoreValue::Float(100.0)
+        );
+    }
+
+    #[test]
+    fn from_task_results_single_fail() {
+        let result = BenchmarkResult::from_task_results(vec![fail_result("t1")]);
+        assert_eq!(
+            result.scores.get("pass_rate").unwrap().value,
+            ScoreValue::Float(0.0)
+        );
+    }
+
+    #[test]
+    fn from_task_results_mixed() {
+        let results = vec![pass_result("t1"), pass_result("t2"), fail_result("t3")];
+        let result = BenchmarkResult::from_task_results(results);
+        // 2/3 = 66.67%
+        let rate = match result.scores.get("pass_rate").unwrap().value {
+            ScoreValue::Float(f) => f,
+            _ => panic!("expected float"),
+        };
+        assert!((rate - 66.67).abs() < 0.1);
+    }
+
+    #[test]
+    fn from_task_results_token_aggregation() {
+        let mut t1 = pass_result("t1");
+        t1.output_tokens = 100;
+        t1.thinking_tokens = 50;
+        let mut t2 = fail_result("t2");
+        t2.output_tokens = 200;
+        t2.thinking_tokens = 75;
+        let result = BenchmarkResult::from_task_results(vec![t1, t2]);
+        let raw_output = result.raw.get("output_tokens").unwrap().as_u64().unwrap();
+        assert_eq!(raw_output, 300);
+        let raw_thinking = result.raw.get("thinking_tokens").unwrap().as_u64().unwrap();
+        assert_eq!(raw_thinking, 125);
+    }
+
+    #[test]
+    fn from_task_results_tool_calls_included() {
+        let mut t = pass_result("t1");
+        t.tool_calls_total = 10;
+        t.tool_calls_valid = 8;
+        t.tool_calls_invalid = 2;
+        let result = BenchmarkResult::from_task_results(vec![t]);
+        assert!(result.scores.contains_key("tool_call_success"));
+        assert!(result.scores.contains_key("tool_calls_total"));
+    }
+
+    #[test]
+    fn from_task_results_tool_calls_omitted_when_zero() {
+        let result = BenchmarkResult::from_task_results(vec![pass_result("t1")]);
+        assert!(!result.scores.contains_key("tool_call_success"));
+        assert!(!result.scores.contains_key("tool_calls_total"));
+    }
+}

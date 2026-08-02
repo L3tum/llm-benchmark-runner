@@ -1,0 +1,212 @@
+[
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["blit", "the cat"], ["frump", "chased"], ["zorp", "the dog"]],
+    "grammar_rules": "[subject] [verb] [object] — English word order: Subject Verb Object",
+    "primer": [["blit frump zorp", "The cat chased the dog"]],
+    "tests": [["zorp frump blit", "The dog chased the cat"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["glarb", "big"], ["fip", "small"], ["blat", "the house"], ["quor", "is"]],
+    "grammar_rules": "[adjective] [noun] [copula] [adjective] — adjectives come before nouns",
+    "primer": [["glarb blat quor glarb", "Big the house is big"], ["fip blat quor fip", "Small the house is small"]],
+    "tests": [["glarb blat quor fip", "Big the house is small"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["uno", "one"], ["dve", "two"], ["tri", "three"], ["chet", "four"], ["plus", "plus"], ["eq", "equals"]],
+    "grammar_rules": "[number] [operator] [number] [equals] [number] — math expression format",
+    "primer": [["uno plus dve eq tri", "one plus two equals three"], ["dve plus dve eq chet", "two plus two equals four"]],
+    "tests": [["uno plus uno eq dve", "one plus one equals two"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["wha", "what"], ["is", "is"], ["this", "this"], ["thar", "there"]],
+    "grammar_rules": "[question-word] [verb] [subject] [location] — question format",
+    "primer": [["wha is this thar", "what is this there"]],
+    "tests": [["wha is thar this", "what is there this"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["hallo", "hello"], ["frend", "friend"], ["gud", "good"], ["morn", "morning"], ["nite", "night"]],
+    "grammar_rules": "[greeting] [comma] [adjective] [noun] — greeting format: Hello, good friend",
+    "primer": [["hallo, gud frend", "hello, good friend"], ["hallo, gud morn", "hello, good morning"]],
+    "tests": [["hallo, gud nite", "hello, good night"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["blu", "blue"], ["red", "red"], ["gre", "green"], ["otom", "car"]],
+    "grammar_rules": "[color] [object] — adjective before noun",
+    "primer": [["blu otom", "blue car"], ["red otom", "red car"]],
+    "tests": [["gre otom", "green car"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["mama", "mom"], ["papa", "dad"], ["luv", "love"], ["yu", "you"]],
+    "grammar_rules": "[subject] [verb] [object] — standard order",
+    "primer": [["mama luv yu", "mom love you"], ["papa luv yu", "dad love you"]],
+    "tests": [["mama luv papa", "mom love dad"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["dog", "k9"], ["cat", "mew"], ["runz", "run"], ["etz", "eat"]],
+    "grammar_rules": "[subject] [verb] — animal does action",
+    "primer": [["k9 runz", "dog runs"], ["mew etz", "cat eats"]],
+    "tests": [["k9 etz", "dog eats"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["nu", "now"], ["letr", "later"], ["swn", "soon"], ["kum", "come"]],
+    "grammar_rules": "[verb] [time] — verb followed by time expression",
+    "primer": [["kum nu", "come now"], ["kum letr", "come later"]],
+    "tests": [["kum swn", "come soon"]]
+  },
+  {
+    "difficulty": "Easy",
+    "vocabulary": [["snn", "sun"], ["ren", "rain"], ["snw", "snow"], ["tday", "today"]],
+    "grammar_rules": "[weather] [time] — weather followed by time",
+    "primer": [["snn tday", "sun today"], ["ren tday", "rain today"]],
+    "tests": [["snw tday", "snow today"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["kro", "the king"], ["rodo", "the kingdom"], ["governs", "govr"], ["with", "wiz"], ["wisdom", "wzdm"]],
+    "grammar_rules": "[some rules apply] — observe the examples to determine word order",
+    "primer": [["kro govr rodo wiz wzdm", "The king governs the kingdom with wisdom"], ["rodo govr kro wiz wzdm", "The kingdom governs the king with wisdom"]],
+    "tests": [["kro govr wiz rodo", "The king governs with the kingdom"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["I", "me"], ["you", "yu"], ["she", "sh"], ["walk", "wlk"], ["walks", "wlks"]],
+    "grammar_rules": "subjects and verbs — study the examples to understand conjugation patterns",
+    "primer": [["me wlk", "I walk"], ["sh wlks", "She walks"]],
+    "tests": [["yu wlk", "You walk"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["the", "da"], ["bird", "brd"], ["flies", "flz"], ["not", "naw"], ["fish", "fsh"]],
+    "grammar_rules": "positive and negative sentences — observe how negation works",
+    "primer": [["da brd flz", "The bird flies"], ["da brd naw flz", "The bird does not fly"]],
+    "tests": [["da fsh naw flz", "The fish does not fly"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["eat", "et"], ["ate", "etzd"], ["will eat", "wil et"], ["food", "fud"]],
+    "grammar_rules": "past, present, and future tenses — infer tense markers from context",
+    "primer": [["I et fud", "I eat food"], ["I etzd fud", "I ate food"]],
+    "tests": [["I wil et fud", "I will eat food"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["cat", "ket"], ["cats", "kets"], ["dog", "dog"], ["dogs", "dogz"], ["play", "plei"]],
+    "grammar_rules": "singular vs plural — study examples to see how plurals are marked",
+    "primer": [["ket plei", "Cat plays"], ["kets plei", "Cats play"]],
+    "tests": [["dogz plei", "Dogs play"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["can", "kn"], ["you", "yu"], ["help", "hlp"], ["me", "mi"], ["want", "wnt"]],
+    "grammar_rules": "questions may invert — observe the structure",
+    "primer": [["yu kn hlp mi", "You can help me"], ["kn yu hlp mi", "Can you help me"]],
+    "tests": [["kn yu wnt mi", "Can you want me"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["John", "Jhn"], ["book", "buk"], ["of", "of"], ["Mary", "Mri"], ["dog", "dog"]],
+    "grammar_rules": "possession is shown differently — study the pattern",
+    "primer": [["buk of Jhn", "John's book"], ["buk of Mri", "Mary's book"]],
+    "tests": [["dog of Jhn", "John's dog"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["big", "big"], ["bigger", "biger"], ["than", "dan"], ["small", "sml"]],
+    "grammar_rules": "comparisons — figure out the comparative structure",
+    "primer": [["big dan sml", "Bigger than small"]],
+    "tests": [["biger dan sml", "Bigger than small"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["go", "gw"], ["left", "lft"], ["right", "rrt"], ["straight", "stret"]],
+    "grammar_rules": "directional phrases — the order matters, observe carefully",
+    "primer": [["gw lft", "Go left"], ["gw rrt", "Go right"]],
+    "tests": [["gw stret", "Go straight"]]
+  },
+  {
+    "difficulty": "Medium",
+    "vocabulary": [["if", "if"], ["rain", "ren"], ["stay", "stei"], ["inside", "insd"], ["sun", "sun"], ["go", "go"], ["outside", "outs"]],
+    "grammar_rules": "conditional statements — note the if-then structure",
+    "primer": [["if ren stei insd", "If rain, stay inside"]],
+    "tests": [["if sun go outs", "If sun, go outside"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["the", "da"], ["wizard", "wrd"], ["cast", "kst"], ["a", "a"], ["spell", "spel"], ["fire", "fir"], ["water", "watr"]],
+    "grammar_rules": "subject-verb-object with articles — some vocabulary is unknown, infer from context",
+    "primer": [["da wrd kst a fir spel", "The wizard cast a fire spell"], ["da wrd kst a watr spel", "The wizard cast a water spell"]],
+    "tests": [["da wrd kst a watr spel", "The wizard cast a water spell"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["dragon", "drgn"], ["fly", "flay"], ["mountain", "mntn"], ["high", "hay"]],
+    "grammar_rules": "compound expressions exist — infer meaning from structure",
+    "primer": [["drgn flay ovr mntn", "Dragon flies over mountain"]],
+    "tests": [["drgn flay ovr hay mntn", "Dragon flies over high mountain"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["he", "he"], ["will", "wil"], ["not", "not"], ["return", "rotn"], ["she", "sh"]],
+    "grammar_rules": "future tense with negation — some words are unfamiliar",
+    "primer": [["he wil rotn", "He will return"], ["he wil not rotn", "He will not return"]],
+    "tests": [["sh wil not rotn", "She will not return"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["once", "wns"], ["upon", "upn"], ["a", "a"], ["time", "tm"]],
+    "grammar_rules": "story opener — some words you need to figure out from context",
+    "primer": [["wns upn a tm", "Once upon a time"], ["wns upn a tm, da wrd livd", "Once upon a time, the wizard lived"]],
+    "tests": [["da wrd livd wns upn a tm", "The wizard lived once upon a time"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["and", "&"], ["or", "|"], ["not", "!"], ["true", "T"], ["false", "F"]],
+    "grammar_rules": "logical expressions — symbols represent logic operators",
+    "primer": [["T & T", "True and True"], ["T | F", "True or False"]],
+    "tests": [["! F", "Not False"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["man", "mn"], ["who", "hu"], ["knows", "noz"], ["secrets", "skr"]],
+    "grammar_rules": "relative clauses — study nesting patterns",
+    "primer": [["mn hu noz skr", "Man who knows secrets"], ["mn hu noz skr nd magk", "Man who knows secrets and magic"]],
+    "tests": [["magk nd skr hu noz mn", "Magic and secrets who knows man"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["2", "ii"], ["4", "iv"], ["add", "+"], ["result", "rsl"]],
+    "grammar_rules": "mathematical notation — symbols may not be familiar",
+    "primer": [["ii + ii = iv", "Two plus two equals four"], ["iv + ii = v", "Four plus two equals five"]],
+    "tests": [["v + ii = vii", "Five plus two equals seven"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["world", "dlrow"], ["hello", "olleh"], ["goodbye", "eybdoog"]],
+    "grammar_rules": "each word is spelled backwards — you need to reverse them back",
+    "primer": [["olleh dlrow", "hello world"], ["eybdoog dlrow", "goodbye world"]],
+    "tests": [["olleh", "hello"], ["dlrow", "world"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["international", "intl"], ["conference", "conf"], ["on", "on"], ["artificial", "artfcl"], ["intelligence", "intelgnc"]],
+    "grammar_rules": "heavily abbreviated — reconstruct full words from context",
+    "primer": [["intl conf on artfcl intelgnc", "International conference on artificial intelligence"], ["artfcl intelgnc conf intl", "Artificial intelligence conference international"]],
+    "tests": [["conf artfcl intelgnc on intl", "Conference artificial intelligence on international"]]
+  },
+  {
+    "difficulty": "Hard",
+    "vocabulary": [["the", "da"], ["ancient", "antsnt"], ["temple", "tmpl"], ["lies", "layz"], ["beneath", "bneth"], ["mountains", "mntns"]],
+    "grammar_rules": "descriptive sentence — some vocabulary and word order patterns are partially known",
+    "primer": [["da antsnt tmpl layz bneth mntns", "The ancient temple lies beneath mountains"], ["mntns layz bneth da antsnt tmpl", "Mountains lie beneath the ancient temple"]],
+    "tests": [["bneth mntns da antsnt tmpl layz", "Beneath mountains the ancient temple lies"]]
+  }
+]

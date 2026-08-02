@@ -1,56 +1,19 @@
-use crate::benchmarks::aime::AimeBenchmark;
-use crate::benchmarks::coding_eval::CodingEvalBenchmark;
-use crate::benchmarks::gpqa::GpqaBenchmark;
-use crate::benchmarks::kld::KldBenchmark;
-use crate::benchmarks::math500::Math500Benchmark;
-use crate::benchmarks::minebench::MinebenchBenchmark;
-use crate::benchmarks::mmlu_pro::MmluProBenchmark;
-use crate::benchmarks::swe_bench::{
-    SweBenchBenchmark, SweBenchProBenchmark, SweBenchVerifiedBenchmark,
-};
 use crate::config::Comparison;
-use crate::reports::console::ConsoleReportGenerator;
 use crate::reports::generator::{ReportContext, ReportGenerator};
 use crate::reports::html::HtmlReportGenerator;
 use crate::reports::markdown::MarkdownReportGenerator;
-use crate::reports::model::{BenchmarkResult, ReportInput, ScoreValue, TestName, TestReportData};
+use crate::reports::model::{ReportInput, TestReportData};
+use crate::shared::{BenchmarkResult, ScoreValue, TestName};
 use anyhow::Result;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::OnceLock;
 
 /// Ordered list of category names for display (includes reserved empty categories).
-static CATEGORY_ORDER: OnceLock<Vec<String>> = OnceLock::new();
-
-fn get_category_order() -> &'static Vec<String> {
-    CATEGORY_ORDER.get_or_init(|| {
-        vec![
-            "Knowledge".to_string(),
-            "Math".to_string(),
-            "Short-Context-Coding".to_string(),
-            "Long-Context-Coding".to_string(),
-            "Creative".to_string(),
-            "Reasoning".to_string(),
-            "Research".to_string(),
-            "Similarity".to_string(),
-        ]
-    })
-}
-
-fn slugify_name(name: String) -> String {
-    name.to_lowercase()
-        .replace(" ", "-")
-        .replace("/", "-")
-        .replace("_", "-")
-        .replace("  ", "-")
-        .trim()
-        .to_string()
-}
-
 /// Build a `ReportInput` from in-memory `BenchmarkResult` objects.
-/// Only used by the mock report command.
-pub(crate) fn build_report_input(
+/// Only used by the mock report command. Benchmarks are discovered
+/// dynamically from the registry — no manual list maintenance needed.
+pub fn build_report_input(
     all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
     post_execute_results: &HashMap<String, BenchmarkResult>,
 ) -> ReportInput {
@@ -59,27 +22,17 @@ pub(crate) fn build_report_input(
         .format("%Y-%m-%d %H:%M:%S UTC")
         .to_string();
 
-    let benchmarks: Vec<Box<dyn crate::benchmarks::Benchmark>> = vec![
-        Box::new(MmluProBenchmark::default()),
-        Box::new(GpqaBenchmark::default()),
-        Box::new(AimeBenchmark::default()),
-        Box::new(Math500Benchmark::default()),
-        Box::new(MinebenchBenchmark::default()),
-        Box::new(CodingEvalBenchmark::default()),
-        Box::new(SweBenchBenchmark::default()),
-        Box::new(SweBenchVerifiedBenchmark::default()),
-        Box::new(SweBenchProBenchmark::default()),
-        Box::new(KldBenchmark::default()),
-    ];
+    // Build benchmark list from the registry — auto-discovers all registered benchmarks
+    let benchmark_entries: Vec<_> = crate::benchmarks::iter_benchmarks().collect();
 
     let mut tests = BTreeMap::new();
 
-    for benchmark in benchmarks {
+    for (bench_name, benchmark) in &benchmark_entries {
         // Collect per-model BenchmarkResult for this benchmark
         let mut model_results: BTreeMap<String, BenchmarkResult> = BTreeMap::new();
 
         for (model_name, bench_results) in all_models_results {
-            if let Some(bench_result) = bench_results.get(benchmark.name()) {
+            if let Some(bench_result) = bench_results.get(*bench_name) {
                 // Call to_report_result on the in-memory result
                 match benchmark.to_report_result(bench_result) {
                     Ok(result) => {
@@ -88,9 +41,7 @@ pub(crate) fn build_report_input(
                     Err(e) => {
                         eprintln!(
                             "Warning: Failed to convert {} result for {}: {}",
-                            benchmark.name(),
-                            model_name,
-                            e
+                            bench_name, model_name, e
                         );
                     }
                 }
@@ -99,14 +50,14 @@ pub(crate) fn build_report_input(
 
         // Aggregate results (from post_execute)
         let aggregate = post_execute_results
-            .get(benchmark.name())
+            .get(*bench_name)
             .and_then(|post_result| benchmark.to_report_aggregate(post_result).ok().flatten());
 
         if !model_results.is_empty() || aggregate.is_some() {
             tests.insert(
-                TestName::new(benchmark.name()),
+                TestName::new(*bench_name),
                 TestReportData {
-                    name: TestName::new(benchmark.name()),
+                    name: TestName::new(*bench_name),
                     display_name: benchmark.display_name().to_string(),
                     category: benchmark.category(),
                     model_results,
@@ -146,14 +97,6 @@ fn build_raw_results_json(
         );
     }
     serde_json::json!({ "models": models })
-}
-
-fn parse_optional_tokens(s: &str) -> Option<i64> {
-    if s.is_empty() || s == "–" {
-        None
-    } else {
-        s.parse::<i64>().ok()
-    }
 }
 
 /// Generate a summary list from the normalized test data.
@@ -287,28 +230,20 @@ fn render_markdown_report(
     MarkdownReportGenerator.generate(&ctx)
 }
 
-fn render_console_report(
-    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
-    post_execute_results: &HashMap<String, BenchmarkResult>,
-) -> Result<String> {
-    let input = build_report_input(all_models_results, post_execute_results);
-    let ctx = ReportContext { input: &input };
-    ConsoleReportGenerator.generate(&ctx)
-}
-
 /// Filter the in-memory results to only include models in the comparison.
 fn filter_comparison_models(
     all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
     comparison: &Comparison,
 ) -> HashMap<String, HashMap<String, BenchmarkResult>> {
-    let model_names: Vec<String> = comparison.models.clone();
-    if model_names.is_empty() {
+    if comparison.models.is_empty() {
         return all_models_results.clone();
     }
 
+    let model_names: HashSet<&str> = comparison.models.iter().map(|s| s.as_str()).collect();
+
     all_models_results
         .iter()
-        .filter(|(name, _)| model_names.contains(name))
+        .filter(|(name, _)| model_names.contains(name.as_str()))
         .map(|(name, results)| (name.clone(), results.clone()))
         .collect()
 }
@@ -381,7 +316,7 @@ fn filter_post_execute_results(
     post_execute_results: &HashMap<String, BenchmarkResult>,
     comparison: &Comparison,
 ) -> HashMap<String, BenchmarkResult> {
-    let model_names: Vec<String> = comparison.models.clone();
+    let model_names: HashSet<&str> = comparison.models.iter().map(|s| s.as_str()).collect();
     if model_names.is_empty() {
         return post_execute_results.clone();
     }
@@ -400,8 +335,7 @@ fn filter_post_execute_results(
                         .iter()
                         .filter(|(key, _)| {
                             if let Some((a, b)) = key.split_once('_') {
-                                model_names.contains(&a.to_string())
-                                    && model_names.contains(&b.to_string())
+                                model_names.contains(a) && model_names.contains(b)
                             } else {
                                 false
                             }
@@ -416,7 +350,7 @@ fn filter_post_execute_results(
                             .and_then(|v| v.as_object())
                             .map(|avg| {
                                 avg.iter()
-                                    .filter(|(name, _)| model_names.contains(name))
+                                    .filter(|(name, _)| model_names.contains(name.as_str()))
                                     .map(|(k, v)| (k.clone(), v.clone()))
                                     .collect::<serde_json::Map<_, _>>()
                             });

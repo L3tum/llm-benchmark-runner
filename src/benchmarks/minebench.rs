@@ -1,8 +1,6 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::reports::model::{
-    Artifact, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult,
-};
+use crate::shared::{Artifact, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
@@ -280,7 +278,7 @@ impl Benchmark for MinebenchBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let buildings = configured_buildings(config)?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.buildings = buildings;
         state.current_idx = 0;
         Ok(())
@@ -293,7 +291,7 @@ impl Benchmark for MinebenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, building_key, build) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.buildings.len() {
                 return Ok(None);
             }
@@ -558,7 +556,7 @@ impl Benchmark for MinebenchToolsBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let buildings = configured_buildings(config)?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.buildings = buildings;
         state.current_idx = 0;
         Ok(())
@@ -571,7 +569,7 @@ impl Benchmark for MinebenchToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, building_key, build) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.buildings.len() {
                 return Ok(None);
             }

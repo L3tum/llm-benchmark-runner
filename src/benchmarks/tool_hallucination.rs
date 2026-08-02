@@ -1,6 +1,6 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
@@ -34,10 +34,12 @@ impl Default for ToolHallucinationBenchmark {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // details field kept for schema alignment
 struct ToolCallReport {
     #[serde(rename = "tool_name")]
     tool_name: String,
     success: bool,
+    #[allow(dead_code)] // details kept for schema alignment
     details: Option<String>,
 }
 
@@ -422,7 +424,7 @@ impl Benchmark for ToolHallucinationBenchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let test_cases = generate_test_cases();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.cases = test_cases;
         state.current_idx = 0;
         Ok(())
@@ -435,7 +437,7 @@ impl Benchmark for ToolHallucinationBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, case) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.cases.len() {
                 return Ok(None);
             }

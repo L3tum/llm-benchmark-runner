@@ -1,21 +1,28 @@
 use crate::config::Model;
-use crate::reports::model::{
-    BenchmarkCategory, BenchmarkResult, TaskResult, TestAggregate, TestName,
-};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult, TestAggregate, TestName};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
+
+// Re-export shared translation benchmark types from shared module.
+pub use crate::shared::{Difficulty, TranslationState};
 
 pub mod aime;
 pub mod answer_classifier;
 pub mod base64;
+pub mod bbh;
 pub mod carwash;
 pub mod cnn_dailymail;
 pub mod coding_eval;
+pub mod cruxeval;
 pub mod ea_mt;
+pub mod efficient_language;
+pub mod factbench;
 pub mod faithdial;
 pub mod fever;
+pub mod fictional_language;
 pub mod gpqa;
+pub mod halubench;
 pub mod halueval;
 pub mod harmbench;
 pub mod hdm_bench;
@@ -28,9 +35,14 @@ pub mod mmlu_pro;
 pub mod mmlu_pro_plus;
 pub mod mmlu_prox;
 pub mod morse_code;
+pub mod multipl_e;
 pub mod nq_open;
+pub mod popqa;
 pub mod race;
 pub mod reverse;
+pub mod ruler;
+pub mod scifact;
+pub mod snli;
 pub mod squad_v2;
 pub mod stable_toolbench;
 pub mod supergpqa;
@@ -41,6 +53,7 @@ pub mod tool_hallucination;
 pub mod triviaqa;
 pub mod true_false;
 pub mod truthful_qa;
+pub mod truthful_qa_gen;
 pub mod xsum;
 
 /// Trait for all benchmarks.
@@ -90,12 +103,34 @@ pub trait Benchmark: Send + Sync {
     ) -> Result<BenchmarkResult> {
         Ok(BenchmarkResult::empty())
     }
+
+    /// Called once after all `execute_one` calls complete.
+    /// Override when your benchmark needs batch evaluation
+    /// (e.g., Docker evaluation, patch application + test running).
+    ///
+    /// `task_results` contains N results from the `execute_one` loop,
+    /// each with `output_tokens`/`thinking_tokens` already populated by the runner.
+    ///
+    /// Return `Some(new_results)` to replace the task results.
+    /// Return `Ok(None)` to keep the original results unchanged.
+    ///
+    /// When returning new results, preserve `output_tokens`/`thinking_tokens`
+    /// from the corresponding original result by matching `task_id`.
+    ///
+    /// Default: does nothing (returns `Ok(None)`).
+    fn batch_evaluate(
+        &self,
+        _task_results: &[TaskResult],
+        _config: &yaml_serde::Value,
+    ) -> Result<Option<Vec<TaskResult>>> {
+        Ok(None)
+    }
 }
 
-fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
-    static REGISTRY: OnceLock<HashMap<String, Box<dyn Benchmark>>> = OnceLock::new();
+fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
+    static REGISTRY: OnceLock<BTreeMap<String, Box<dyn Benchmark>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let mut map = HashMap::new();
+        let mut map = BTreeMap::new();
         map.insert(
             "mmlu_pro".to_string(),
             Box::new(mmlu_pro::MmluProBenchmark::default()) as Box<dyn Benchmark>,
@@ -127,6 +162,16 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "carwash".to_string(),
             Box::new(carwash::CarwashBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "fictional_language".to_string(),
+            Box::new(fictional_language::FictionalLanguageBenchmark::default())
+                as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "efficient_language".to_string(),
+            Box::new(efficient_language::EfficientLanguageBenchmark::default())
+                as Box<dyn Benchmark>,
         );
         map.insert(
             "reverse".to_string(),
@@ -195,6 +240,10 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
         map.insert(
             "mbpp_plus".to_string(),
             Box::new(coding_eval::MbppPlusBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "multipl_e".to_string(),
+            Box::new(multipl_e::MultiPLEBenchmark::default()) as Box<dyn Benchmark>,
         );
         map.insert(
             "swebench".to_string(),
@@ -289,12 +338,63 @@ fn registry() -> &'static HashMap<String, Box<dyn Benchmark>> {
             "ea_mt".to_string(),
             Box::new(ea_mt::EAMTBenchmark::default()) as Box<dyn Benchmark>,
         );
+        // --- New benchmarks: Research & Hallucination suite ---
+        map.insert(
+            "scifact".to_string(),
+            Box::new(scifact::SciFactBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "snli".to_string(),
+            Box::new(snli::SnliBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "popqa".to_string(),
+            Box::new(popqa::PopQABenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "cruxeval".to_string(),
+            Box::new(cruxeval::CruxEvalBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "ruler".to_string(),
+            Box::new(ruler::RulerBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "halubench".to_string(),
+            Box::new(halubench::HaluBenchBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "bbh".to_string(),
+            Box::new(bbh::BbhBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "factbench".to_string(),
+            Box::new(factbench::FactBenchBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "truthful_qa_gen".to_string(),
+            Box::new(truthful_qa_gen::TruthfulQAGenBenchmark::default()) as Box<dyn Benchmark>,
+        );
         map
     })
 }
 
 pub fn get_benchmark_names() -> Vec<String> {
     registry().keys().cloned().collect()
+}
+
+/// Get a reference to a benchmark by name (for trait dispatch).
+pub fn get_benchmark(name: &str) -> Result<&'static dyn Benchmark> {
+    registry()
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("Benchmark '{}' not found", name))
+        .map(|b| b.as_ref() as &dyn Benchmark)
+}
+
+/// Iterate over all registered benchmarks, yielding (name, &Box<dyn Benchmark>).
+/// Order is alphabetical (backed by BTreeMap).
+pub fn iter_benchmarks() -> impl Iterator<Item = (&'static String, &'static Box<dyn Benchmark>)> {
+    registry().iter()
 }
 
 pub fn pre_execute_benchmark(name: &str, config: &yaml_serde::Value) -> Result<()> {
@@ -325,4 +425,120 @@ pub fn post_execute_benchmark(
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("Unknown benchmark: {name}"))?
         .post_execute(model_results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iter_benchmarks_returns_all_registered() {
+        let count = iter_benchmarks().count();
+        assert_eq!(count, get_benchmark_names().len());
+        // Verify we can access benchmarks by name
+        for (name, _bench) in iter_benchmarks() {
+            assert!(!name.is_empty(), "Benchmark name should not be empty");
+        }
+    }
+
+    // ---- batch_evaluate path tests ----
+
+    /// Mock benchmark for testing batch_evaluate trait method behavior.
+    struct MockBatchBenchmark {
+        mode: MockBatchMode,
+    }
+
+    enum MockBatchMode {
+        NewResults,
+        NoOp,
+        Error,
+    }
+
+    impl Benchmark for MockBatchBenchmark {
+        fn name(&self) -> &str {
+            "mock_batch"
+        }
+        fn display_name(&self) -> &'static str {
+            "Mock Batch"
+        }
+        fn category(&self) -> BenchmarkCategory {
+            BenchmarkCategory::Other("test".into())
+        }
+        fn execute_one(
+            &self,
+            _model: &Model,
+            _config: &yaml_serde::Value,
+            _tracker: &mut crate::token_tracker::TokenTracker,
+        ) -> Result<Option<TaskResult>> {
+            Ok(None)
+        }
+
+        fn batch_evaluate(
+            &self,
+            task_results: &[TaskResult],
+            _config: &yaml_serde::Value,
+        ) -> Result<Option<Vec<TaskResult>>> {
+            match self.mode {
+                MockBatchMode::NewResults => {
+                    // Replace results — mark all as passed
+                    let new_results: Vec<TaskResult> = task_results
+                        .iter()
+                        .map(|t| {
+                            let mut t = t.clone();
+                            t.passed = true;
+                            t.score = 1.0;
+                            t
+                        })
+                        .collect();
+                    Ok(Some(new_results))
+                }
+                MockBatchMode::NoOp => Ok(None),
+                MockBatchMode::Error => Err(anyhow::anyhow!("batch eval failed for testing")),
+            }
+        }
+    }
+
+    #[test]
+    fn batch_evaluate_can_replace_results() {
+        let bench = MockBatchBenchmark {
+            mode: MockBatchMode::NewResults,
+        };
+        let task_results = vec![
+            TaskResult::new("t1", false, 0.0, vec![]),
+            TaskResult::new("t2", false, 0.0, vec![]),
+        ];
+
+        let result = bench
+            .batch_evaluate(&task_results, &yaml_serde::Value::Null)
+            .unwrap();
+        assert!(result.is_some());
+        let updated = result.unwrap();
+        assert_eq!(updated.len(), 2);
+        assert!(updated[0].passed);
+        assert!(updated[1].passed);
+    }
+
+    #[test]
+    fn batch_evaluate_can_return_none_noop() {
+        let bench = MockBatchBenchmark {
+            mode: MockBatchMode::NoOp,
+        };
+        let task_results = vec![TaskResult::new("t1", true, 1.0, vec![])];
+
+        let result = bench
+            .batch_evaluate(&task_results, &yaml_serde::Value::Null)
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn batch_evaluate_can_return_error() {
+        let bench = MockBatchBenchmark {
+            mode: MockBatchMode::Error,
+        };
+        let task_results = vec![TaskResult::new("t1", true, 1.0, vec![])];
+
+        let result = bench.batch_evaluate(&task_results, &yaml_serde::Value::Null);
+        assert!(result.is_err());
+    }
 }

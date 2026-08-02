@@ -1,7 +1,7 @@
 use crate::benchmarks::answer_classifier::{classify_wrong_answer, WrongAnswerClass};
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use regex::Regex;
@@ -150,7 +150,7 @@ impl Benchmark for GpqaBenchmark {
             items.len()
         );
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
         state.wrong_classes = BTreeMap::new();
@@ -164,7 +164,7 @@ impl Benchmark for GpqaBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (q, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -195,7 +195,7 @@ impl Benchmark for GpqaBenchmark {
         if !is_correct {
             let wrong_class =
                 classify_wrong_answer(&response, &question_text, expected.unwrap_or('?'), pred);
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             let counter = state.wrong_classes.entry(wrong_class).or_insert(0);
             *counter += 1;
         }
@@ -218,7 +218,7 @@ impl Benchmark for GpqaBenchmark {
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
         let raw = &b.raw;
-        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
+        use crate::shared::{BreakdownTable, Score, ScoreUnit};
 
         let (total, correct, _wrong, output_tokens, thinking_tokens) = {
             if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {

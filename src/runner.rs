@@ -1,7 +1,7 @@
 use crate::benchmarks;
 use crate::client::Client;
 use crate::config::{self, DockerConfig, Model};
-use crate::reports::model::{BenchmarkResult, Diagnostic, TaskResult};
+use crate::shared::{BenchmarkResult, Diagnostic, TaskResult};
 use crate::token_tracker::TokenTracker;
 use crate::utils::format_duration;
 use anyhow::Result;
@@ -181,7 +181,9 @@ pub struct ModelProcessGuard {
 impl ModelProcessGuard {
     pub fn new(process: Child, cmd_stop: Option<String>) -> Self {
         let pid = process.id() as u64;
-        *CURRENT_MODEL_PID.lock().unwrap() = Some(pid);
+        *CURRENT_MODEL_PID
+            .lock()
+            .expect(crate::shared::MUTEX_PANIC_MSG) = Some(pid);
         Self {
             cmd_stop,
             process: Some(process),
@@ -190,7 +192,9 @@ impl ModelProcessGuard {
 
     pub fn stop(&mut self) {
         // Clear the global PID first to prevent double-kills from ctrl-c handler
-        *CURRENT_MODEL_PID.lock().unwrap() = None;
+        *CURRENT_MODEL_PID
+            .lock()
+            .expect(crate::shared::MUTEX_PANIC_MSG) = None;
         if let Some(process) = self.process.take() {
             stop_model(&self.cmd_stop, process);
         }
@@ -228,14 +232,14 @@ fn run_benchmark(
             Ok(Some(mut task_result)) => {
                 // Annotate with per-task token delta from tracker
                 let (curr_output, curr_thinking) = tracker.snapshot();
-                task_result.output_tokens = curr_output - prev_output;
-                task_result.thinking_tokens = curr_thinking - prev_thinking;
+                task_result.output_tokens = curr_output.saturating_sub(prev_output);
+                task_result.thinking_tokens = curr_thinking.saturating_sub(prev_thinking);
 
                 // Annotate with per-task tool call delta from tracker
                 let (curr_tc_total, curr_tc_valid, curr_tc_invalid) = tracker.tool_call_snapshot();
-                task_result.tool_calls_total = curr_tc_total - prev_tc_total;
-                task_result.tool_calls_valid = curr_tc_valid - prev_tc_valid;
-                task_result.tool_calls_invalid = curr_tc_invalid - prev_tc_invalid;
+                task_result.tool_calls_total = curr_tc_total.saturating_sub(prev_tc_total);
+                task_result.tool_calls_valid = curr_tc_valid.saturating_sub(prev_tc_valid);
+                task_result.tool_calls_invalid = curr_tc_invalid.saturating_sub(prev_tc_invalid);
 
                 task_results.push(task_result);
             }
@@ -245,6 +249,21 @@ fn run_benchmark(
             }
             Err(e) => {
                 return Err(e);
+            }
+        }
+    }
+
+    // Check if benchmark supports batch evaluation
+    if let Ok(bench) = benchmarks::get_benchmark(bench_name) {
+        match bench.batch_evaluate(&task_results, bench_cfg) {
+            Ok(Some(new_results)) => task_results = new_results,
+            Ok(None) => { /* batch evaluator chose not to modify results */ }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "batch evaluation failed for {}: {}",
+                    bench_name,
+                    e
+                ));
             }
         }
     }

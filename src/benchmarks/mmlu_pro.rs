@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use regex::Regex;
@@ -67,6 +67,7 @@ impl MmluProBenchmark {
         Ok(items)
     }
 
+    #[allow(dead_code)] // reserved for category-level aggregation
     fn group_by_category(items: Vec<MmluItem>) -> HashMap<String, Vec<MmluItem>> {
         let mut groups: HashMap<String, Vec<MmluItem>> = HashMap::new();
         for item in items {
@@ -98,7 +99,7 @@ impl Benchmark for MmluProBenchmark {
         let data_path = self.download_dataset("test")?;
         let all_items = self.load_dataset(&data_path)?;
         println!("MMLU-Pro: {} total questions", all_items.len());
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = all_items;
         state.current_idx = 0;
         Ok(())
@@ -111,7 +112,7 @@ impl Benchmark for MmluProBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (q, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -157,7 +158,7 @@ impl Benchmark for MmluProBenchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        use crate::reports::model::{BreakdownTable, Score, ScoreUnit};
+        use crate::shared::{BreakdownTable, Score, ScoreUnit};
 
         let raw = &b.raw;
 

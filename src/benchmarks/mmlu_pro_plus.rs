@@ -3,7 +3,7 @@ use crate::token_tracker::TokenTracker;
 
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -31,6 +31,7 @@ impl Default for MmluProPlusBenchmark {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // id and category kept for schema alignment
 struct MmluProPlusItem {
     id: String,
     category: String,
@@ -110,7 +111,7 @@ impl Benchmark for MmluProPlusBenchmark {
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let items = load_mmlu_pro_plus();
         println!("MMLU-Pro+: {} total questions", items.len());
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -125,7 +126,7 @@ impl Benchmark for MmluProPlusBenchmark {
         use std::collections::HashSet;
 
         let (item, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

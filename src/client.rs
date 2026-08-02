@@ -199,7 +199,6 @@ impl Client {
 
         Ok((text, output_tokens, thinking_tokens))
     }
-    #[expect(dead_code)]
     pub fn chat_completion_logprobs(
         &self,
         model_name: &str,

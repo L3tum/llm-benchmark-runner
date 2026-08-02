@@ -1,6 +1,6 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::reports::model::{BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -44,7 +44,7 @@ impl Benchmark for CarwashBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let should_execute = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.done {
                 return Ok(None);
             }

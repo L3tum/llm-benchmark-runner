@@ -1,14 +1,14 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::docker_runner::{DockerBuildConfig, DockerMount, DockerRunConfig, DockerRunner};
-use crate::reports::model::{
+use crate::shared::{
     BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit, TaskResult,
 };
 use crate::token_tracker::TokenTracker;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,10 @@ pub struct SweBenchBenchmark {
 struct SweBenchState {
     items: Vec<SweBenchInstance>,
     current_idx: usize,
+    /// Generated patches per instance, stored during execute_one for batch evaluation
+    generated_patches: HashMap<String, String>,
+    /// Dataset variant for this benchmark (set during pre_execute)
+    dataset: SweBenchDataset,
 }
 
 impl Default for SweBenchBenchmark {
@@ -29,6 +33,8 @@ impl Default for SweBenchBenchmark {
             state: Mutex::new(SweBenchState {
                 items: Vec::new(),
                 current_idx: 0,
+                generated_patches: HashMap::new(),
+                dataset: SweBenchDataset::Basic,
             }),
         }
     }
@@ -104,6 +110,7 @@ enum SweBenchDataset {
 }
 
 impl SweBenchDataset {
+    #[allow(dead_code)] // used for registry naming; currently resolved from enum variant
     fn benchmark_name(self) -> &'static str {
         match self {
             Self::Basic => "swebench",
@@ -129,9 +136,12 @@ struct SweBenchConfig {
     dataset: SweBenchDataset,
     dataset_id: String,
     split: String,
+    #[allow(dead_code)]
+    // parsed from config but not yet consumed by harness; reserved for sampling support
     num_samples: Option<usize>,
     token_env: Option<String>,
     timeout_secs: u64,
+    #[allow(dead_code)] // parsed from config but not yet consumed; reserved for local repo cloning
     host_repo_path: Option<PathBuf>,
     harness_image: String,
     build_images: bool,
@@ -166,6 +176,7 @@ struct SweBenchInstance {
     difficulty: Option<String>,
 }
 
+#[allow(dead_code)] // used by harness for prediction format
 #[derive(Debug, Serialize)]
 struct SweBenchPrediction<'a> {
     instance_id: &'a str,
@@ -189,9 +200,10 @@ impl Benchmark for SweBenchBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench: {} instances", items.len());
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
+        state.dataset = SweBenchDataset::Basic;
         Ok(())
     }
 
@@ -202,7 +214,7 @@ impl Benchmark for SweBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -212,7 +224,7 @@ impl Benchmark for SweBenchBenchmark {
             (item, idx)
         };
 
-        let system_prompt = "You are a software engineer tasked with fixing a bug. Analyze the issue and generate a patch.";
+        let system_prompt = "You are a software engineer tasked with fixing a bug. Analyze the issue and generate a git diff patch.";
         let prompt = format!(
             "Issue: {}
 
@@ -221,94 +233,211 @@ impl Benchmark for SweBenchBenchmark {
         );
         let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
 
-        let resolved = !response.is_empty(); // Simplified validation
+        // Extract patch from response for batch evaluation
+        let patch = extract_diff(&response);
 
+        // Validate patch size (prevent runaway LLM output from filling disk)
+        const MAX_PATCH_BYTES: usize = 1_048_576;
+        let patch = if patch.len() > MAX_PATCH_BYTES {
+            eprintln!(
+                "  Warning: patch for task-{} exceeds {} bytes ({} bytes), truncating",
+                idx,
+                MAX_PATCH_BYTES,
+                patch.len()
+            );
+            patch[..MAX_PATCH_BYTES].to_string()
+        } else {
+            patch
+        };
+
+        // Store patch for batch evaluation
+        {
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            state
+                .generated_patches
+                .insert(format!("task-{}", idx), patch);
+        }
+
+        // Return placeholder result; batch_evaluate will evaluate patches in Docker
         Ok(Some(
             TaskResult::new(
                 format!("task-{}", idx),
-                resolved,
-                if resolved { 1.0 } else { 0.0 },
+                false,
+                0.0,
                 vec![instance.repo.clone()],
             )
             .with_metadata(Some(serde_json::json!({
-                "instance_id": instance.instance_id, "correct": resolved,
+                "instance_id": instance.instance_id,
             }))),
         ))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let raw = &b.raw;
-        let (total, resolved, output_tokens, thinking_tokens) = {
-            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
-                let total = per_task.len() as i64;
-                let resolved = per_task
-                    .iter()
-                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
-                    .count() as i64;
-                let out: i64 = per_task
-                    .iter()
-                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                let think: i64 = per_task
-                    .iter()
-                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                (total, resolved, out, think)
-            } else {
-                (
-                    raw.get("total_instances")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0),
-                    raw.get("output_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("thinking_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                )
+        // SWE-Bench basic includes total_instances
+        Ok(build_swe_bench_report(b, true))
+    }
+
+    fn batch_evaluate(
+        &self,
+        task_results: &[TaskResult],
+        _config: &yaml_serde::Value,
+    ) -> Result<Option<Vec<TaskResult>>> {
+        let (patch_pairs, dataset) = {
+            let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+
+            if state.generated_patches.is_empty() {
+                return Ok(None);
+            }
+
+            // Build O(1) lookup: task_id → instance (fixes O(n²) → O(n))
+            let items_by_id: HashMap<&str, &SweBenchInstance> = state
+                .items
+                .iter()
+                .map(|item| (item.instance_id.as_str(), item))
+                .collect();
+
+            // Collect (instance, patch, task_id) pairs for batch harness evaluation
+            let mut patch_pairs: Vec<(SweBenchInstance, String, String)> = Vec::new();
+            for tr in task_results.iter() {
+                if let Some(patch) = state.generated_patches.get(&tr.task_id) {
+                    if let Some(instance) = items_by_id.get(tr.task_id.as_str()) {
+                        patch_pairs.push(((*instance).clone(), patch.clone(), tr.task_id.clone()));
+                    }
+                }
+            }
+
+            let dataset = state.dataset;
+            (patch_pairs, dataset)
+        };
+
+        if patch_pairs.is_empty() {
+            return Ok(None);
+        }
+
+        // Build O(1) lookup: task_id → instance (fixes O(n²) → O(n))
+        let task_to_instance: HashMap<&str, &SweBenchInstance> = patch_pairs
+            .iter()
+            .map(|(instance, _, tid)| (tid.as_str(), instance))
+            .collect();
+
+        // Parse harness config
+        let cfg = parse_config(dataset, _config)?;
+
+        // Create temporary working directory for harness I/O
+        let run_dir = match tempfile::tempdir_in(
+            dirs::cache_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join("llm-benchmark-runner"),
+        ) {
+            Ok(d) => d.path().to_path_buf(),
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to create temporary directory for SWE-Bench harness evaluation. \
+                     Ensure you have write access to your cache directory."
+                ));
             }
         };
-        let pass_rate = if total > 0 {
-            resolved as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "pass_rate".to_string(),
-            Score::float(pass_rate, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
+        let predictions_path = run_dir.join("predictions.jsonl");
+
+        // Write predictions.jsonl (swebench-harness expects this format)
+        {
+            let mut file = fs::File::create(&predictions_path)?;
+            for (instance, patch, _tid) in &patch_pairs {
+                let prediction = serde_json::json!({
+                    "instance_id": instance.instance_id,
+                    "model_name_or_path": "llm-benchmark-runner",
+                    "model_patch": patch,
+                });
+                writeln!(file, "{}", serde_json::to_string(&prediction)?)?;
+            }
+        }
+        println!(
+            "  Running SWE-Bench harness for {} patches...",
+            patch_pairs.len()
         );
-        scores.insert(
-            "resolved".to_string(),
-            Score::integer(resolved, ScoreUnit::Count),
-        );
-        scores.insert(
-            "total_instances".to_string(),
-            Score::integer(total, ScoreUnit::Count),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
+
+        // Run the actual SWE-Bench harness
+        let harness_result = run_swebench_harness(&cfg, &run_dir, &predictions_path)?;
+
+        if harness_result.timed_out {
+            eprintln!(
+                "  Warning: SWE-Bench harness timed out after {} seconds",
+                cfg.timeout_secs
             );
         }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
+        if !harness_result.passed {
+            eprintln!(
+                "  Warning: SWE-Bench harness exited with error: {}",
+                harness_result.error_summary
             );
         }
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw.clone(),
-        })
+
+        // Collect JSON files once and reuse for both consumers
+        let mut json_files = Vec::new();
+        if let Ok(()) = collect_json_files(&run_dir, &mut json_files, 0) {
+            // Quick resolved count summary from harness output
+            if let Some(count) = parse_resolved_count_from_files(&json_files) {
+                println!(
+                    "  SWE-Bench harness reported {} resolved (from summary files)",
+                    count
+                );
+            }
+
+            // Parse individual resolved instance IDs from harness output JSON files
+            let mut resolved_instance_ids: HashSet<String> = HashSet::new();
+            for path in &json_files {
+                if let Ok(content) = fs::read_to_string(path) {
+                    if let Ok(value) = serde_json::from_str::<JsonValue>(&content) {
+                        // Check for resolved_ids arrays
+                        for key in ["resolved_ids", "resolved", "resolved_instances"] {
+                            if let Some(arr) = value.get(key).and_then(|v| v.as_array()) {
+                                for id in arr {
+                                    if let Some(s) = id.as_str() {
+                                        resolved_instance_ids.insert(s.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        // Check for per-instance resolved: true fields
+                        if let Some(obj) = value.as_object() {
+                            for (k, v) in obj {
+                                if let Some(true) = v.get("resolved").and_then(|r| r.as_bool()) {
+                                    resolved_instance_ids.insert(k.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            println!(
+                "  SWE-Bench harness: {} resolved / {} total ({:.1}%)",
+                resolved_instance_ids.len(),
+                patch_pairs.len(),
+                if patch_pairs.is_empty() {
+                    0.0
+                } else {
+                    resolved_instance_ids.len() as f64 / patch_pairs.len() as f64 * 100.0
+                }
+            );
+
+            // Map harness results back to TaskResults using O(1) HashMap lookup
+            let updated: Vec<TaskResult> = task_results
+                .iter()
+                .map(|tr| {
+                    let mut updated = tr.clone();
+                    if let Some(instance) = task_to_instance.get(tr.task_id.as_str()) {
+                        updated.passed = resolved_instance_ids.contains(&instance.instance_id);
+                        updated.score = if updated.passed { 1.0 } else { 0.0 };
+                    }
+                    updated
+                })
+                .collect();
+
+            return Ok(Some(updated));
+        }
+
+        Ok(None)
     }
 }
 
@@ -328,7 +457,7 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Verified: {} instances", items.len());
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -341,7 +470,7 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -376,74 +505,8 @@ impl Benchmark for SweBenchVerifiedBenchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let raw = &b.raw;
-        let (total, resolved, output_tokens, thinking_tokens) = {
-            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
-                let total = per_task.len() as i64;
-                let resolved = per_task
-                    .iter()
-                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
-                    .count() as i64;
-                let out: i64 = per_task
-                    .iter()
-                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                let think: i64 = per_task
-                    .iter()
-                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                (total, resolved, out, think)
-            } else {
-                (
-                    raw.get("total_instances")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0),
-                    raw.get("output_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("thinking_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                )
-            }
-        };
-        let pass_rate = if total > 0 {
-            resolved as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "pass_rate".to_string(),
-            Score::float(pass_rate, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        scores.insert(
-            "resolved".to_string(),
-            Score::integer(resolved, ScoreUnit::Count),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw.clone(),
-        })
+        // SWE-Bench Verified does NOT include total_instances
+        Ok(build_swe_bench_report(b, false))
     }
 }
 
@@ -463,7 +526,7 @@ impl Benchmark for SweBenchProBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Pro: {} instances", items.len());
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -476,7 +539,7 @@ impl Benchmark for SweBenchProBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -511,74 +574,8 @@ impl Benchmark for SweBenchProBenchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let raw = &b.raw;
-        let (total, resolved, output_tokens, thinking_tokens) = {
-            if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
-                let total = per_task.len() as i64;
-                let resolved = per_task
-                    .iter()
-                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
-                    .count() as i64;
-                let out: i64 = per_task
-                    .iter()
-                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                let think: i64 = per_task
-                    .iter()
-                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                (total, resolved, out, think)
-            } else {
-                (
-                    raw.get("total_instances")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0),
-                    raw.get("output_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("thinking_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                )
-            }
-        };
-        let pass_rate = if total > 0 {
-            resolved as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "pass_rate".to_string(),
-            Score::float(pass_rate, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        scores.insert(
-            "resolved".to_string(),
-            Score::integer(resolved, ScoreUnit::Count),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw.clone(),
-        })
+        // SWE-Bench Pro does NOT include total_instances
+        Ok(build_swe_bench_report(b, false))
     }
 }
 
@@ -598,7 +595,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Multilingual: {} instances", items.len());
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -611,7 +608,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -649,75 +646,11 @@ impl Benchmark for SweBenchMultilingualBenchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let raw = &b.raw;
-        let (total, resolved, output_tokens, thinking_tokens, per_task) = {
-            if let Some(pt) = raw.get("per_task").and_then(|v| v.as_array()) {
-                let total = pt.len() as i64;
-                let resolved = pt
-                    .iter()
-                    .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
-                    .count() as i64;
-                let out: i64 = pt
-                    .iter()
-                    .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                let think: i64 = pt
-                    .iter()
-                    .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_i64()))
-                    .sum();
-                (total, resolved, out, think, Some(pt.clone()))
-            } else {
-                (
-                    raw.get("total_instances")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0),
-                    raw.get("output_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    raw.get("thinking_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    None,
-                )
-            }
-        };
-        let pass_rate = if total > 0 {
-            resolved as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "pass_rate".to_string(),
-            Score::float(pass_rate, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        scores.insert(
-            "resolved".to_string(),
-            Score::integer(resolved, ScoreUnit::Count),
-        );
-        scores.insert(
-            "total_instances".to_string(),
-            Score::integer(total, ScoreUnit::Count),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
+        // Start with the common SWE-Bench report including total_instances
+        let mut result = build_swe_bench_report(b, true);
 
         // Per-language breakdown table
-        let mut breakdowns = BTreeMap::new();
-        if let Some(per_task) = per_task {
+        if let Some(per_task) = b.raw.get("per_task").and_then(|v| v.as_array()) {
             let mut lang_counts: BTreeMap<String, (i64, i64)> = BTreeMap::new();
 
             for task in per_task {
@@ -762,7 +695,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
                         ]),
                     );
                 }
-                breakdowns.insert(
+                result.breakdowns.insert(
                     "By Language".to_string(),
                     BreakdownTable {
                         title: "Pass Rate by Programming Language".to_string(),
@@ -772,14 +705,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
             }
         }
 
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns,
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![],
-            raw: raw.clone(),
-        })
+        Ok(result)
     }
 }
 
@@ -787,8 +713,11 @@ impl Benchmark for SweBenchMultilingualBenchmark {
 struct HarnessResult {
     passed: bool,
     timed_out: bool,
+    #[allow(dead_code)] // captured for future diagnostics
     exit_code: Option<i32>,
+    #[allow(dead_code)] // captured for future diagnostics
     stdout: String,
+    #[allow(dead_code)] // captured for future diagnostics
     stderr: String,
     error_summary: String,
 }
@@ -797,6 +726,85 @@ fn prepare_swebench(cfg: &SweBenchConfig) -> Result<()> {
     ensure_swebench_harness_image(cfg)?;
     let _ = load_or_download_dataset(cfg)?;
     Ok(())
+}
+
+/// Build a SWE-Bench report result from an in-memory BenchmarkResult.
+/// If `include_total_instances` is true, adds a "total_instances" score.
+fn build_swe_bench_report(b: &BenchmarkResult, include_total_instances: bool) -> BenchmarkResult {
+    let raw = &b.raw;
+    let (total, resolved, output_tokens, thinking_tokens) = {
+        if let Some(per_task) = raw.get("per_task").and_then(|v| v.as_array()) {
+            let total = per_task.len() as i64;
+            let resolved = per_task
+                .iter()
+                .filter(|t| t.get("passed").and_then(|v| v.as_bool()).unwrap_or(false))
+                .count() as i64;
+            let out: u64 = per_task
+                .iter()
+                .filter_map(|t| t.get("output_tokens").and_then(|v| v.as_u64()))
+                .sum();
+            let think: u64 = per_task
+                .iter()
+                .filter_map(|t| t.get("thinking_tokens").and_then(|v| v.as_u64()))
+                .sum();
+            (total, resolved, out, think)
+        } else {
+            (
+                raw.get("total_instances")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                raw.get("resolved").and_then(|v| v.as_i64()).unwrap_or(0),
+                raw.get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                raw.get("thinking_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            )
+        }
+    };
+    let pass_rate = if total > 0 {
+        resolved as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+    let mut scores = BTreeMap::new();
+    scores.insert(
+        "pass_rate".to_string(),
+        Score::float(pass_rate, ScoreUnit::Percent)
+            .primary(true)
+            .higher_is_better(true),
+    );
+    scores.insert(
+        "resolved".to_string(),
+        Score::integer(resolved, ScoreUnit::Count),
+    );
+    if include_total_instances {
+        scores.insert(
+            "total_instances".to_string(),
+            Score::integer(total, ScoreUnit::Count),
+        );
+    }
+    if output_tokens > 0 {
+        scores.insert(
+            "output_tokens".to_string(),
+            Score::integer(output_tokens as i64, ScoreUnit::Tokens),
+        );
+    }
+    if thinking_tokens > 0 {
+        scores.insert(
+            "thinking_tokens".to_string(),
+            Score::integer(thinking_tokens as i64, ScoreUnit::Tokens),
+        );
+    }
+    BenchmarkResult {
+        scores,
+        breakdowns: BTreeMap::new(),
+        error_classification: BTreeMap::new(),
+        artifacts: vec![],
+        diagnostics: vec![],
+        raw: raw.clone(),
+    }
 }
 
 fn ensure_swebench_harness_image(cfg: &SweBenchConfig) -> Result<()> {
@@ -841,6 +849,7 @@ fn ensure_swebench_harness_image(cfg: &SweBenchConfig) -> Result<()> {
     Ok(())
 }
 
+// Run the swebench-harness Docker container for batch patch evaluation
 fn run_swebench_harness(
     cfg: &SweBenchConfig,
     run_dir: &Path,
@@ -867,6 +876,9 @@ fn run_swebench_harness(
     );
     docker.mounts.push(DockerMount::readwrite(run_dir, "/work"));
     if cfg.mount_docker_socket {
+        eprintln!(
+            "  WARNING: Docker socket mounted — harness container has full Docker access on host"
+        );
         if !cfg.docker_socket_path.exists() {
             return Err(anyhow::anyhow!(
                 "SWE-Bench official harness requires Docker socket access, but {} does not exist. Set docker.mount_docker_socket=false only for harness images that do not need Docker, or configure docker.docker_socket_path.",
@@ -883,12 +895,37 @@ fn run_swebench_harness(
     docker.name_prefix = "llm-benchmark-runner-swebench".to_string();
     // SWE-Bench harness needs network for repository/image/dataset setup unless all artifacts are pre-cached.
     docker.network_none = false;
-    docker.read_only_root = false;
-    docker.tmpfs.clear();
-    docker.pids_limit = None;
-    docker.memory = None;
+    docker.read_only_root = true;
+    docker.tmpfs = vec![
+        "/tmp".to_string(),
+        "/var/run/docker.sock".to_string(),
+        "/root".to_string(),
+    ];
+    docker.pids_limit = Some(200);
+    docker.memory = Some("4g".to_string());
+
+    // Whitelist allowed token environment variable names for security
+    const ALLOWED_TOKEN_ENVS: &[&str] = &[
+        "HF_TOKEN",
+        "GH_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "GITHUB_TOKEN",
+    ];
+
     if let Some(token_env) = &cfg.token_env {
+        if !ALLOWED_TOKEN_ENVS.contains(&token_env.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Refusing to pass env var '{}' to Docker container. \
+                 Allowed token env vars: {:?}",
+                token_env,
+                ALLOWED_TOKEN_ENVS
+            ));
+        }
         if let Ok(token) = std::env::var(token_env) {
+            eprintln!(
+                "  NOTE: Token env '{}' passed to container (visible via 'docker inspect')",
+                token_env
+            );
             docker.env.push((token_env.clone(), token.clone()));
             if token_env != "HF_TOKEN" {
                 docker.env.push(("HF_TOKEN".to_string(), token));
@@ -978,7 +1015,7 @@ fn parse_config(dataset: SweBenchDataset, config: &yaml_serde::Value) -> Result<
     let mount_docker_socket = docker_cfg
         .and_then(|docker| docker.get("mount_docker_socket"))
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     Ok(SweBenchConfig {
         dataset,
         dataset_id,
@@ -1088,6 +1125,8 @@ fn download_hf_rows(cfg: &SweBenchConfig) -> Result<Vec<SweBenchInstance>> {
     Ok(rows)
 }
 
+// Build patch prompt for an SWE-bench instance (used by harness)
+#[allow(dead_code)]
 fn build_patch_prompt(instance: &SweBenchInstance) -> String {
     format!(
         "You are solving a SWE-Bench repository issue. Return ONLY a unified diff patch. Do not include markdown fences, explanations, or prose.\n\nRepository: {}\nBase commit: {}\nInstance: {}\n\nProblem statement:\n{}\n\nHints:\n{}\n\nReturn the patch now.",
@@ -1115,11 +1154,8 @@ fn extract_diff(response: &str) -> String {
     trimmed.to_string()
 }
 
-fn parse_resolved_count(run_dir: &Path) -> Option<usize> {
-    let mut json_files = Vec::new();
-    collect_json_files(run_dir, &mut json_files, 0).ok()?;
-    json_files.sort();
-
+// Parse resolved count from a pre-collected list of JSON files (avoids duplicate directory traversal)
+fn parse_resolved_count_from_files(json_files: &[PathBuf]) -> Option<usize> {
     let mut best = None;
     for path in json_files {
         let Ok(content) = fs::read_to_string(path) else {
@@ -1135,6 +1171,7 @@ fn parse_resolved_count(run_dir: &Path) -> Option<usize> {
     best
 }
 
+// Recursively collect JSON files from harness output
 fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
     if depth > 6 || out.len() > 2000 || !dir.is_dir() {
         return Ok(());
@@ -1151,6 +1188,7 @@ fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Resul
     Ok(())
 }
 
+// Parse resolved count from a single JSON result file
 fn resolved_count_from_json(value: &JsonValue) -> Option<usize> {
     if let Some(n) = value.get("resolved").and_then(|v| v.as_u64()) {
         return Some(n as usize);

@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -215,7 +215,10 @@ impl Benchmark for MorseCodeBenchmark {
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
-        load_config(&mut self.state.lock().unwrap(), config);
+        load_config(
+            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            config,
+        );
         Ok(())
     }
 
@@ -226,7 +229,7 @@ impl Benchmark for MorseCodeBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -344,7 +347,10 @@ impl Benchmark for MorseCodeToolsBenchmark {
     }
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
-        load_config(&mut self.state.lock().unwrap(), config);
+        load_config(
+            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            config,
+        );
         Ok(())
     }
 
@@ -355,7 +361,7 @@ impl Benchmark for MorseCodeToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }

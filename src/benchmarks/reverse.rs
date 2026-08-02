@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::reports::model::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -115,7 +115,7 @@ impl Benchmark for ReverseBenchmark {
         let custom_words = config::extract_string_vec(config, "words");
         let num_samples = config::extract_usize(config, "num_samples");
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         if let Some(words) = custom_words {
             state.words = words;
         }
@@ -137,7 +137,7 @@ impl Benchmark for ReverseBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (word, task_id) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.words.len() {
                 return Ok(None);
             }
@@ -230,7 +230,7 @@ impl Benchmark for ReverseToolsBenchmark {
         let custom_words = config::extract_string_vec(config, "words");
         let num_samples = config::extract_usize(config, "num_samples");
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         if let Some(words) = custom_words {
             state.words = words;
         }
@@ -252,7 +252,7 @@ impl Benchmark for ReverseToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (word, task_id) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.words.len() {
                 return Ok(None);
             }

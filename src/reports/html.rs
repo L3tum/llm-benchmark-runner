@@ -1303,13 +1303,6 @@ struct CategoryData {
     kld_avg_results: Vec<KldAvgResult>,
 }
 
-/// Token usage result per benchmark per model.
-#[derive(Serialize)]
-struct TokenUsageResult {
-    output_tokens: String,
-    thinking_tokens: String,
-}
-
 /// Report template with category data.
 #[cfg(not(feature = "renderer-official"))]
 #[derive(Template)]

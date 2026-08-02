@@ -1,0 +1,260 @@
+[
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["[", "The LLM is asked to"], ["]", "this task"], ["→", "the result should be"], ["?", "what is"]],
+    "shown_dictionary": [["[", "The LLM is asked to"], ["]", "this task"], ["→", "the result should be"], ["?", "what is"]],
+    "tests": [
+      ["[ decipher ]", "The LLM is asked to decipher this task"],
+      ["? →", "what is the result should be"]
+    ]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["∑", "the sum of"], ["×", "the product of"], ["=", "equals"], ["2", "two"], ["3", "three"]],
+    "shown_dictionary": [["∑", "the sum of"], ["×", "the product of"], ["=", "equals"], ["2", "two"], ["3", "three"]],
+    "tests": [
+      ["∑ 2 = 3", "the sum of two equals three"],
+      ["× 2 3", "the product of two three"]
+    ]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["→", "go to"], ["←", "come from"], ["↑", "up"], ["↓", "down"]],
+    "shown_dictionary": [["→", "go to"], ["←", "come from"], ["↑", "up"], ["↓", "down"]],
+    "tests": [
+      ["→ ↑", "go to up"],
+      ["← ↓", "come from down"]
+    ]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["😀", "happy"], ["😢", "sad"], ["😡", "angry"], ["♥", "love"]],
+    "shown_dictionary": [["😀", "happy"], ["😢", "sad"], ["😡", "angry"], ["♥", "love"]],
+    "tests": [
+      ["😀 ♥", "happy love"],
+      ["😢 😡", "sad angry"]
+    ]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["♪", "note"], ["♩", "beat"], ["♫", "melody"], ["♬", "harmony"]],
+    "shown_dictionary": [["♪", "note"], ["♩", "beat"], ["♫", "melody"], ["♬", "harmony"]],
+    "tests": [
+      ["♪ ♩", "note beat"],
+      ["♫ ♬", "melody harmony"]
+    ]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["&&", "and"], ["||", "or"], ["!", "not"], ["==", "equals"]],
+    "shown_dictionary": [["&&", "and"], ["||", "or"], ["!", "not"], ["==", "equals"]],
+    "tests": [
+      ["true && false", "true and false"],
+      ["! true", "not true"]
+    ]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["H₂O", "water"], ["CO₂", "carbon dioxide"], ["O₂", "oxygen"], ["NaCl", "salt"]],
+    "shown_dictionary": [["H₂O", "water"], ["CO₂", "carbon dioxide"], ["O₂", "oxygen"], ["NaCl", "salt"]],
+    "tests": [["H₂O + NaCl", "water plus salt"]]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["☀", "sunny"], ["☁", "cloudy"], ["🌧", "rainy"], ["❄", "snowy"]],
+    "shown_dictionary": [["☀", "sunny"], ["☁", "cloudy"], ["🌧", "rainy"], ["❄", "snowy"]],
+    "tests": [["☀ → ☁", "sunny to cloudy"]]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["🚦", "traffic light"], ["🛑", "stop"], ["→", "right"], ["←", "left"]],
+    "shown_dictionary": [["🚦", "traffic light"], ["🛑", "stop"], ["→", "right"], ["←", "left"]],
+    "tests": [["🛑 →", "stop right"]]
+  },
+  {
+    "difficulty": "Easy",
+    "full_dictionary": [["N", "north"], ["S", "south"], ["E", "east"], ["W", "west"], ["→", "toward"]],
+    "shown_dictionary": [["N", "north"], ["S", "south"], ["E", "east"], ["W", "west"], ["→", "toward"]],
+    "tests": [["N → E", "north toward east"]]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["∑", "the sum of"], ["×", "the product of"], ["÷", "the quotient of"], ["-", "the difference of"], ["=", "equals"]],
+    "shown_dictionary": [["∑", "the sum of"], ["×", "the product of"], ["=", "equals"]],
+    "tests": [
+      ["∑ × =", "the sum of the product of equals"],
+      ["- ÷", "the difference of the quotient of"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["😀", "happy"], ["😢", "sad"], ["😡", "angry"], ["😱", "shocked"], ["😴", "sleepy"]],
+    "shown_dictionary": [["😀", "happy"], ["😢", "sad"]],
+    "tests": [
+      ["😀 😢", "happy sad"],
+      ["😱 😡", "shocked angry"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["→", "go to"], ["←", "return from"], ["↑", "go up"], ["↓", "go down"], ["↺", "go back"]],
+    "shown_dictionary": [["→", "go to"], ["↑", "go up"], ["↓", "go down"]],
+    "tests": [
+      ["→ ↑ ↓", "go to go up go down"],
+      ["↺ ←", "go back return from"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["&&", "logical and"], ["||", "logical or"], ["!", "logical not"], ["!==", "not equal"], ["<=", "less than or equal"]],
+    "shown_dictionary": [["&&", "logical and"], ["||", "logical or"], ["!", "logical not"]],
+    "tests": [
+      ["a && b || c", "a logical and b logical or c"],
+      ["a !== b", "a not equal b"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["☀", "sunny"], ["☁", "cloudy"], ["🌧", "rainy"], ["❄", "snowy"], ["⚡", "stormy"], ["~", "becoming"]],
+    "shown_dictionary": [["☀", "sunny"], ["☁", "cloudy"], ["~", "becoming"]],
+    "tests": [
+      ["☀ ~ ☁", "sunny becoming cloudy"],
+      ["🌧 ~ ⚡", "rainy becoming stormy"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["H₂O", "water"], ["+", "combined with"], ["→", "produces"], ["CO₂", "carbon dioxide"], ["O₂", "oxygen"], ["CH₄", "methane"]],
+    "shown_dictionary": [["H₂O", "water"], ["+", "combined with"], ["→", "produces"], ["CO₂", "carbon dioxide"]],
+    "tests": [
+      ["H₂O + CO₂ →", "water combined with carbon dioxide produces"],
+      ["CH₄ + O₂ →", "methane combined with oxygen produces"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["N", "north"], ["S", "south"], ["E", "east"], ["W", "west"], ["↗", "northeast"], ["↙", "southwest"], ["→", "toward"]],
+    "shown_dictionary": [["N", "north"], ["S", "south"], ["E", "east"], ["→", "toward"]],
+    "tests": [
+      ["N → E", "north toward east"],
+      ["↗ ↙", "northeast southwest"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["♪", "quarter note"], ["♩", "quarter rest"], ["𝄞", "treble clef"], ["♭", "flat"], ["♯", "sharp"]],
+    "shown_dictionary": [["♪", "quarter note"], ["♩", "quarter rest"]],
+    "tests": [
+      ["♪ ♩", "quarter note quarter rest"],
+      ["♭ ♯", "flat sharp"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["∀", "for all"], ["∃", "there exists"], ["∧", "and"], ["∨", "or"], ["¬", "not"], ["⇒", "implies"]],
+    "shown_dictionary": [["∀", "for all"], ["∃", "there exists"], ["∧", "and"]],
+    "tests": [
+      ["∀ ∧ ∃", "for all and there exists"],
+      ["¬ ⇒", "not implies"]
+    ]
+  },
+  {
+    "difficulty": "Medium",
+    "full_dictionary": [["/", "root directory"], ["..", "parent directory"], [".", "current directory"], ["~", "home directory"], ["*", "all files"], ["?", "any single character"]],
+    "shown_dictionary": [["/", "root directory"], ["..", "parent directory"], [".", "current directory"], ["~", "home directory"]],
+    "tests": [
+      ["~/..", "home directory parent directory"],
+      ["/* ?", "root directory all files any single character"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["∑", "the sum of"], ["∏", "the product of"], ["∫", "the integral of"], ["∂", "the partial derivative of"], ["∞", "infinity"], ["⊕", "XOR"], ["⊗", "tensor product"]],
+    "shown_dictionary": [["∑", "the sum of"], ["∞", "infinity"]],
+    "tests": [
+      ["∑ ∞", "the sum of infinity"],
+      ["∏ ∫", "the product of the integral of"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["😀", "happy"], ["😢", "sad"], ["💪", "strong"], ["🧠", "smart"], ["💔", "heartbroken"], ["🔥", "on fire"], ["👑", "royal"]],
+    "shown_dictionary": [["😀", "happy"], ["🔥", "on fire"]],
+    "tests": [
+      ["😀 🔥", "happy on fire"],
+      ["💪 🧠", "strong smart"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["{", "begin block"], ["}", "end block"], [";", "statement end"], ["=", "assign"], ["->", "returns"], ["*", "pointer to"], ["&", "reference to"]],
+    "shown_dictionary": [["{", "begin block"], ["}", "end block"]],
+    "tests": [
+      ["{ x = 5; }", "begin block assign x to 5 statement end end block"],
+      ["* & ->", "pointer to reference to returns"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["H₂O", "water"], ["→", "yields"], ["+", "reacts with"], ["Δ", "heat applied"], ["⇌", "equilibrium"], ["↑", "gas released"], ["↓", "precipitate formed"]],
+    "shown_dictionary": [["H₂O", "water"], ["→", "yields"]],
+    "tests": [
+      ["H₂O →", "water yields"],
+      ["Δ ⇌ ↑", "heat applied equilibrium gas released"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["∀", "for every"], ["∃", "there exists"], ["∧", "and"], ["∨", "or"], ["¬", "not"], ["→", "implies"], ["↔", "if and only if"], ["⊨", "models"]],
+    "shown_dictionary": [["∀", "for every"], ["∧", "and"]],
+    "tests": [
+      ["∀ ∧", "for every and"],
+      ["∃ ↔ ⊨", "there exists if and only if models"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["cp", "copy file"], ["mv", "move file"], ["rm", "remove file"], ["ls", "list files"], ["cat", "concatenate and display"], ["grep", "search text"], ["|", "pipe output to"], [">", "redirect to file"], ["2>", "redirect errors to file"]],
+    "shown_dictionary": [["ls", "list files"], ["cat", "concatenate and display"]],
+    "tests": [
+      ["ls | cat", "list files pipe output to concatenate and display"],
+      ["cp >", "copy file redirect to file"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["𝄞", "treble clef"], ["𝄢", "bass clef"], ["𝅘𝅥𝅮", "eighth note"], ["𝅘𝅥𝅯", "sixteenth note"], ["𝄽", "fermata"], ["𝄞♭", "flat key signature"], ["𝄞♯", "sharp key signature"]],
+    "shown_dictionary": [["𝄞", "treble clef"]],
+    "tests": [
+      ["𝄞", "treble clef"],
+      ["𝄢 𝄽", "bass clef fermata"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["[]", "array of"], ["{}", "dictionary of"], ["()", "tuple of"], ["<>", "generic type"], ["?", "nullable"], ["&", "reference"], ["*", "pointer"]],
+    "shown_dictionary": [["[]", "array of"]],
+    "tests": [
+      ["[]", "array of"],
+      ["{} ?", "dictionary of nullable"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["∠", "angle"], ["△", "triangle"], ["□", "square"], ["○", "circle"], ["⬡", "hexagon"], ["≈", "approximately equal"], ["≅", "congruent to"], ["∥", "parallel to"]],
+    "shown_dictionary": [["△", "triangle"], ["○", "circle"]],
+    "tests": [
+      ["△ ○", "triangle circle"],
+      ["∠ ∥", "angle parallel to"]
+    ]
+  },
+  {
+    "difficulty": "Hard",
+    "full_dictionary": [["μ", "mean"], ["σ", "standard deviation"], ["σ²", "variance"], ["ρ", "correlation coefficient"], ["p", "p-value"], ["α", "significance level"], ["β", "type II error"], ["λ", "lambda parameter"]],
+    "shown_dictionary": [["μ", "mean"]],
+    "tests": [
+      ["μ", "mean"],
+      ["σ² ρ", "variance correlation coefficient"]
+    ]
+  }
+]
