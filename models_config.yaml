@@ -1,6 +1,139 @@
 # Model configurations for the benchmark suite.
 # Each model is started directly, benchmarked against its local proxy, then stopped.
 
+# ---------------------------------------------------------------------------
+# Profiles — pick one by changing the value of profile below, then use
+#   benchmarks: !macro [{{profile}}, {}]
+# to expand the selected list.
+#
+#   "all"              — every registered benchmark (60 total, incl. Docker)
+#   "all_no_docker"    — all benchmarks that do NOT require Docker (53 total)
+# ---------------------------------------------------------------------------
+variables:
+  profile: "all_no_docker"
+
+macros:
+  # Run every registered benchmark.
+  all:
+    - mmlu_pro
+    - supergpqa
+    - kld
+    - gpqa
+    - aime
+    - math500
+    - minebench
+    - carwash
+    - fictional_language
+    - efficient_language
+    - reverse
+    - reverse_tools
+    - morse_code
+    - morse_code_tools
+    - base64
+    - base64_tools
+    - hex
+    - hex_tools
+    - svg_moonwalk
+    - svg_bike
+    - minebench_tools
+    - ifeval
+    - harmbench
+    - coding_eval
+    - humaneval
+    - humaneval_plus
+    - mbpp_plus
+    - multipl_e
+    - swebench
+    - swebench_verified
+    - swebench_pro
+    - swebench_multilingual
+    - tool_hallucination
+    - terminal_bench
+    - stable_toolbench
+    - truthful_qa
+    - truthful_qa_mc2
+    - fever
+    - halueval
+    - true_false
+    - faithdial
+    - hdm_bench
+    - nq_open
+    - triviaqa
+    - mmlu_pro_plus
+    - mmlu_prox
+    - race
+    - squad_v2
+    - xsum
+    - cnn_dailymail
+    - ea_mt
+    - scifact
+    - snli
+    - popqa
+    - cruxeval
+    - ruler
+    - halubench
+    - bbh
+    - factbench
+    - truthful_qa_gen
+
+  # All benchmarks that do NOT require Docker containers.
+  # Excludes: multipl_e, swebench, swebench_verified, swebench_pro,
+  #           swebench_multilingual, terminal_bench, cruxeval
+  all_no_docker:
+    - mmlu_pro
+    - supergpqa
+    - kld
+    - gpqa
+    - aime
+    - math500
+    - minebench
+    - carwash
+    - fictional_language
+    - efficient_language
+    - reverse
+    - reverse_tools
+    - morse_code
+    - morse_code_tools
+    - base64
+    - base64_tools
+    - hex
+    - hex_tools
+    - svg_moonwalk
+    - svg_bike
+    - minebench_tools
+    - ifeval
+    - harmbench
+    - coding_eval
+    - humaneval
+    - humaneval_plus
+    - mbpp_plus
+    - tool_hallucination
+    - stable_toolbench
+    - truthful_qa
+    - truthful_qa_mc2
+    - fever
+    - halueval
+    - true_false
+    - faithdial
+    - hdm_bench
+    - nq_open
+    - triviaqa
+    - mmlu_pro_plus
+    - mmlu_prox
+    - race
+    - squad_v2
+    - xsum
+    - cnn_dailymail
+    - ea_mt
+    - scifact
+    - snli
+    - popqa
+    - ruler
+    - halubench
+    - bbh
+    - factbench
+    - truthful_qa_gen
+
 models:
   - display_name: "MyModel Q4"
     model: "model"  # model name to send to the proxy API (llama-server uses "model")
@@ -18,31 +151,17 @@ models:
     cmd: "llama-server -m /path/to/model.Q5.gguf --port 28288"
     proxy: "http://localhost:28288/v1"
 
+# Benchmarks to run. Use a profile macro for "all" or "all_no_docker",
+# or replace the line below with an explicit list for fine-grained control.
 benchmarks:
-  - mmlu_pro
-  - kld
-  # - minebench
-  # Quick sanity check:
-  # - carwash
-  # Fictional/efficient language translation:
-  # - fictional_language
-  # - efficient_language
-  # Instruction-following evaluation:
-  # - ifeval
-  # Safety evaluation (base harmfulness, no Docker):
-  # - harmbench
-  # Function-completion coding benchmarks:
-  # - humaneval_plus
-  # - humaneval
-  # - mbpp_plus
-  # Multi-language coding benchmark (HumanEval translated to 30+ languages):
-  # - multipl_e
-  # Repository patch benchmarks:
-  # - swebench_verified
-  # - swebench_pro
-  # Tool-use benchmarks:
-  # - terminal_bench
-  # - stable_toolbench
+  !macro [{{profile}}, {}]
+
+# To override with a custom list, replace the line above with explicit entries:
+# benchmarks:
+#   - mmlu_pro
+#   - kld
+#   - carwash
+#   - ifeval
 
 # Shared runtime settings for benchmarks that execute generated code/tests in Docker.
 # build_images auto-builds missing local benchmark images, including the SWE-Bench harness.
