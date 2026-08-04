@@ -9,8 +9,10 @@ pub use crate::shared::{Difficulty, TranslationState};
 
 pub mod aime;
 pub mod answer_classifier;
+pub mod apps;
 pub mod base64;
 pub mod bbh;
+pub mod bullshitbench;
 pub mod carwash;
 pub mod cnn_dailymail;
 pub mod coding_eval;
@@ -29,6 +31,7 @@ pub mod hdm_bench;
 pub mod hex;
 pub mod ifeval;
 pub mod kld;
+pub mod linux_kernel_security;
 pub mod math500;
 pub mod minebench;
 pub mod mmlu_pro;
@@ -150,6 +153,10 @@ fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
         map.insert(
             "aime".to_string(),
             Box::new(aime::AimeBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "apps".to_string(),
+            Box::new(apps::AppsBenchmark::default()) as Box<dyn Benchmark>,
         );
         map.insert(
             "math500".to_string(),
@@ -366,6 +373,15 @@ fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
         map.insert(
             "bbh".to_string(),
             Box::new(bbh::BbhBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "bullshitbench".to_string(),
+            Box::new(bullshitbench::BullshitBenchBenchmark::default()) as Box<dyn Benchmark>,
+        );
+        map.insert(
+            "linux_kernel_security".to_string(),
+            Box::new(linux_kernel_security::LinuxKernelSecurityBenchmark::default())
+                as Box<dyn Benchmark>,
         );
         map.insert(
             "factbench".to_string(),

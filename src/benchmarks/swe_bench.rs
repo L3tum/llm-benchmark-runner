@@ -2,7 +2,7 @@ use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::docker_runner::{DockerBuildConfig, DockerMount, DockerRunConfig, DockerRunner};
 use crate::shared::{
-    BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit, TaskResult,
+    truncate, BenchmarkCategory, BenchmarkResult, BreakdownTable, Score, ScoreUnit, TaskResult,
 };
 use crate::token_tracker::TokenTracker;
 use anyhow::{Context, Result};
@@ -14,6 +14,37 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Maximum size of a generated patch in bytes (1 MB).
+const MAX_PATCH_BYTES: usize = 1_048_576;
+
+/// Maximum allowed iterations for bash agent mode.
+const MAX_ALLOWED_ITERATIONS: usize = 200;
+
+// Agent commands run inside a Docker sandbox with cap_drop=ALL, network_none,
+// read_only_root, PID limits, and memory limits — no allowlist needed.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum AgentMode {
+    #[default]
+    ZeroShot,
+    Bash,
+}
+
+impl std::str::FromStr for AgentMode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "zero-shot" | "zero_shot" | "zero" => Ok(Self::ZeroShot),
+            "bash" | "agent" | "loop" => Ok(Self::Bash),
+            other => Err(anyhow::anyhow!(
+                "Unknown agent_mode: '{}'. Use 'zero-shot' or 'bash'.",
+                other
+            )),
+        }
+    }
+}
+
 pub struct SweBenchBenchmark {
     state: Mutex<SweBenchState>,
 }
@@ -22,9 +53,11 @@ struct SweBenchState {
     items: Vec<SweBenchInstance>,
     current_idx: usize,
     /// Generated patches per instance, stored during execute_one for batch evaluation
-    generated_patches: HashMap<String, String>,
+    generated_patches: HashMap<usize, String>,
     /// Dataset variant for this benchmark (set during pre_execute)
     dataset: SweBenchDataset,
+    /// Config for agent mode support
+    config: Option<SweBenchConfig>,
 }
 
 impl Default for SweBenchBenchmark {
@@ -35,6 +68,7 @@ impl Default for SweBenchBenchmark {
                 current_idx: 0,
                 generated_patches: HashMap::new(),
                 dataset: SweBenchDataset::Basic,
+                config: None,
             }),
         }
     }
@@ -46,6 +80,8 @@ pub struct SweBenchVerifiedBenchmark {
 struct SweBenchVerifiedState {
     items: Vec<SweBenchInstance>,
     current_idx: usize,
+    generated_patches: HashMap<usize, String>,
+    config: Option<SweBenchConfig>,
 }
 
 impl Default for SweBenchVerifiedBenchmark {
@@ -54,6 +90,8 @@ impl Default for SweBenchVerifiedBenchmark {
             state: Mutex::new(SweBenchVerifiedState {
                 items: Vec::new(),
                 current_idx: 0,
+                generated_patches: HashMap::new(),
+                config: None,
             }),
         }
     }
@@ -65,6 +103,8 @@ pub struct SweBenchProBenchmark {
 struct SweBenchProState {
     items: Vec<SweBenchInstance>,
     current_idx: usize,
+    generated_patches: HashMap<usize, String>,
+    config: Option<SweBenchConfig>,
 }
 
 impl Default for SweBenchProBenchmark {
@@ -73,6 +113,8 @@ impl Default for SweBenchProBenchmark {
             state: Mutex::new(SweBenchProState {
                 items: Vec::new(),
                 current_idx: 0,
+                generated_patches: HashMap::new(),
+                config: None,
             }),
         }
     }
@@ -88,6 +130,8 @@ pub struct SweBenchMultilingualBenchmark {
 struct SweBenchMultilingualState {
     items: Vec<SweBenchInstance>,
     current_idx: usize,
+    generated_patches: HashMap<usize, String>,
+    config: Option<SweBenchConfig>,
 }
 
 impl Default for SweBenchMultilingualBenchmark {
@@ -96,6 +140,8 @@ impl Default for SweBenchMultilingualBenchmark {
             state: Mutex::new(SweBenchMultilingualState {
                 items: Vec::new(),
                 current_idx: 0,
+                generated_patches: HashMap::new(),
+                config: None,
             }),
         }
     }
@@ -148,6 +194,12 @@ struct SweBenchConfig {
     max_workers: usize,
     docker_socket_path: PathBuf,
     mount_docker_socket: bool,
+    /// Agent mode: "zero-shot" (default, single prompt) or "bash" (mini-swe-agent style loop)
+    #[allow(dead_code)] // consumed by execute_one agent loop path
+    agent_mode: AgentMode,
+    /// Maximum iterations for bash agent mode
+    #[allow(dead_code)] // consumed by execute_one agent loop path
+    max_iterations: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +256,7 @@ impl Benchmark for SweBenchBenchmark {
         state.items = items;
         state.current_idx = 0;
         state.dataset = SweBenchDataset::Basic;
+        state.config = Some(cfg);
         Ok(())
     }
 
@@ -213,63 +266,34 @@ impl Benchmark for SweBenchBenchmark {
         _config: &yaml_serde::Value,
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
-        let (instance, idx) = {
+        let (instance, idx, cfg) = {
             let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
             let idx = state.current_idx;
-            let item = state.items[idx].clone();
             state.current_idx += 1;
-            (item, idx)
+            let item = state.items[idx].clone();
+            let cfg = state.config.clone();
+            (item, idx, cfg)
         };
 
-        let system_prompt = "You are a software engineer tasked with fixing a bug. Analyze the issue and generate a git diff patch.";
-        let prompt = format!(
-            "Issue: {}
+        // Run outside lock scope — LLM calls run without holding the mutex
+        let (result, patch) = execute_one_impl(
+            idx,
+            &instance,
+            model,
+            tracker,
+            cfg,
+            |inst| serde_json::json!({ "instance_id": inst.instance_id }),
+        )?;
 
-{}",
-            instance.problem_statement, instance.base_commit
-        );
-        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
-
-        // Extract patch from response for batch evaluation
-        let patch = extract_diff(&response);
-
-        // Validate patch size (prevent runaway LLM output from filling disk)
-        const MAX_PATCH_BYTES: usize = 1_048_576;
-        let patch = if patch.len() > MAX_PATCH_BYTES {
-            eprintln!(
-                "  Warning: patch for task-{} exceeds {} bytes ({} bytes), truncating",
-                idx,
-                MAX_PATCH_BYTES,
-                patch.len()
-            );
-            patch[..MAX_PATCH_BYTES].to_string()
-        } else {
-            patch
-        };
-
-        // Store patch for batch evaluation
-        {
+        // Briefly lock just for HashMap insert
+        if let Some(p) = patch {
             let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
-            state
-                .generated_patches
-                .insert(format!("task-{}", idx), patch);
+            state.generated_patches.insert(idx, p);
         }
-
-        // Return placeholder result; batch_evaluate will evaluate patches in Docker
-        Ok(Some(
-            TaskResult::new(
-                format!("task-{}", idx),
-                false,
-                0.0,
-                vec![instance.repo.clone()],
-            )
-            .with_metadata(Some(serde_json::json!({
-                "instance_id": instance.instance_id,
-            }))),
-        ))
+        Ok(Some(result))
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
@@ -280,164 +304,20 @@ impl Benchmark for SweBenchBenchmark {
     fn batch_evaluate(
         &self,
         task_results: &[TaskResult],
-        _config: &yaml_serde::Value,
+        config: &yaml_serde::Value,
     ) -> Result<Option<Vec<TaskResult>>> {
-        let (patch_pairs, dataset) = {
-            let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
-
-            if state.generated_patches.is_empty() {
-                return Ok(None);
-            }
-
-            // Build O(1) lookup: task_id → instance (fixes O(n²) → O(n))
-            let items_by_id: HashMap<&str, &SweBenchInstance> = state
-                .items
-                .iter()
-                .map(|item| (item.instance_id.as_str(), item))
-                .collect();
-
-            // Collect (instance, patch, task_id) pairs for batch harness evaluation
-            let mut patch_pairs: Vec<(SweBenchInstance, String, String)> = Vec::new();
-            for tr in task_results.iter() {
-                if let Some(patch) = state.generated_patches.get(&tr.task_id) {
-                    if let Some(instance) = items_by_id.get(tr.task_id.as_str()) {
-                        patch_pairs.push(((*instance).clone(), patch.clone(), tr.task_id.clone()));
-                    }
-                }
-            }
-
-            let dataset = state.dataset;
-            (patch_pairs, dataset)
-        };
-
-        if patch_pairs.is_empty() {
+        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        if state.generated_patches.is_empty() {
             return Ok(None);
         }
-
-        // Build O(1) lookup: task_id → instance (fixes O(n²) → O(n))
-        let task_to_instance: HashMap<&str, &SweBenchInstance> = patch_pairs
-            .iter()
-            .map(|(instance, _, tid)| (tid.as_str(), instance))
-            .collect();
-
-        // Parse harness config
-        let cfg = parse_config(dataset, _config)?;
-
-        // Create temporary working directory for harness I/O
-        let run_dir = match tempfile::tempdir_in(
-            dirs::cache_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join("llm-benchmark-runner"),
-        ) {
-            Ok(d) => d.path().to_path_buf(),
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "Failed to create temporary directory for SWE-Bench harness evaluation. \
-                     Ensure you have write access to your cache directory."
-                ));
-            }
-        };
-        let predictions_path = run_dir.join("predictions.jsonl");
-
-        // Write predictions.jsonl (swebench-harness expects this format)
-        {
-            let mut file = fs::File::create(&predictions_path)?;
-            for (instance, patch, _tid) in &patch_pairs {
-                let prediction = serde_json::json!({
-                    "instance_id": instance.instance_id,
-                    "model_name_or_path": "llm-benchmark-runner",
-                    "model_patch": patch,
-                });
-                writeln!(file, "{}", serde_json::to_string(&prediction)?)?;
-            }
-        }
-        println!(
-            "  Running SWE-Bench harness for {} patches...",
-            patch_pairs.len()
-        );
-
-        // Run the actual SWE-Bench harness
-        let harness_result = run_swebench_harness(&cfg, &run_dir, &predictions_path)?;
-
-        if harness_result.timed_out {
-            eprintln!(
-                "  Warning: SWE-Bench harness timed out after {} seconds",
-                cfg.timeout_secs
-            );
-        }
-        if !harness_result.passed {
-            eprintln!(
-                "  Warning: SWE-Bench harness exited with error: {}",
-                harness_result.error_summary
-            );
-        }
-
-        // Collect JSON files once and reuse for both consumers
-        let mut json_files = Vec::new();
-        if let Ok(()) = collect_json_files(&run_dir, &mut json_files, 0) {
-            // Quick resolved count summary from harness output
-            if let Some(count) = parse_resolved_count_from_files(&json_files) {
-                println!(
-                    "  SWE-Bench harness reported {} resolved (from summary files)",
-                    count
-                );
-            }
-
-            // Parse individual resolved instance IDs from harness output JSON files
-            let mut resolved_instance_ids: HashSet<String> = HashSet::new();
-            for path in &json_files {
-                if let Ok(content) = fs::read_to_string(path) {
-                    if let Ok(value) = serde_json::from_str::<JsonValue>(&content) {
-                        // Check for resolved_ids arrays
-                        for key in ["resolved_ids", "resolved", "resolved_instances"] {
-                            if let Some(arr) = value.get(key).and_then(|v| v.as_array()) {
-                                for id in arr {
-                                    if let Some(s) = id.as_str() {
-                                        resolved_instance_ids.insert(s.to_string());
-                                    }
-                                }
-                            }
-                        }
-                        // Check for per-instance resolved: true fields
-                        if let Some(obj) = value.as_object() {
-                            for (k, v) in obj {
-                                if let Some(true) = v.get("resolved").and_then(|r| r.as_bool()) {
-                                    resolved_instance_ids.insert(k.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            println!(
-                "  SWE-Bench harness: {} resolved / {} total ({:.1}%)",
-                resolved_instance_ids.len(),
-                patch_pairs.len(),
-                if patch_pairs.is_empty() {
-                    0.0
-                } else {
-                    resolved_instance_ids.len() as f64 / patch_pairs.len() as f64 * 100.0
-                }
-            );
-
-            // Map harness results back to TaskResults using O(1) HashMap lookup
-            let updated: Vec<TaskResult> = task_results
-                .iter()
-                .map(|tr| {
-                    let mut updated = tr.clone();
-                    if let Some(instance) = task_to_instance.get(tr.task_id.as_str()) {
-                        updated.passed = resolved_instance_ids.contains(&instance.instance_id);
-                        updated.score = if updated.passed { 1.0 } else { 0.0 };
-                    }
-                    updated
-                })
-                .collect();
-
-            return Ok(Some(updated));
-        }
-
-        Ok(None)
+        batch_evaluate_impl(
+            &state.items,
+            &state.generated_patches,
+            task_results,
+            state.dataset,
+            "SWE-Bench",
+            config,
+        )
     }
 }
 
@@ -460,6 +340,7 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
+        state.config = Some(cfg);
         Ok(())
     }
 
@@ -469,39 +350,57 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         _config: &yaml_serde::Value,
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
-        let (instance, idx) = {
+        let (instance, idx, cfg) = {
             let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
             let idx = state.current_idx;
-            let item = state.items[idx].clone();
             state.current_idx += 1;
-            (item, idx)
+            let item = state.items[idx].clone();
+            let cfg = state.config.clone();
+            (item, idx, cfg)
         };
 
-        let system_prompt = "You are a software engineer tasked with fixing a bug. Analyze the issue and generate a patch.";
-        let prompt = format!(
-            "Issue: {}
+        // Run outside lock scope — LLM calls run without holding the mutex
+        let (result, patch) = execute_one_impl(
+            idx,
+            &instance,
+            model,
+            tracker,
+            cfg,
+            |inst| serde_json::json!({ "instance_id": inst.instance_id }),
+        )?;
 
-{}",
-            instance.problem_statement, instance.base_commit
-        );
-        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        // Briefly lock just for HashMap insert
+        if let Some(p) = patch {
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            state.generated_patches.insert(idx, p);
+        }
+        Ok(Some(result))
+    }
 
-        let resolved = !response.is_empty(); // Simplified validation
-
-        Ok(Some(
-            TaskResult::new(
-                format!("task-{}", idx),
-                resolved,
-                if resolved { 1.0 } else { 0.0 },
-                vec![instance.repo.clone()],
-            )
-            .with_metadata(Some(serde_json::json!({
-                "instance_id": instance.instance_id, "correct": resolved,
-            }))),
-        ))
+    fn batch_evaluate(
+        &self,
+        task_results: &[TaskResult],
+        config: &yaml_serde::Value,
+    ) -> Result<Option<Vec<TaskResult>>> {
+        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        if state.generated_patches.is_empty() {
+            return Ok(None);
+        }
+        batch_evaluate_impl(
+            &state.items,
+            &state.generated_patches,
+            task_results,
+            state
+                .config
+                .as_ref()
+                .map(|c| c.dataset)
+                .unwrap_or(SweBenchDataset::Verified),
+            "SWE-Bench Verified",
+            config,
+        )
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
@@ -529,6 +428,7 @@ impl Benchmark for SweBenchProBenchmark {
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
+        state.config = Some(cfg);
         Ok(())
     }
 
@@ -538,39 +438,57 @@ impl Benchmark for SweBenchProBenchmark {
         _config: &yaml_serde::Value,
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
-        let (instance, idx) = {
+        let (instance, idx, cfg) = {
             let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
             let idx = state.current_idx;
-            let item = state.items[idx].clone();
             state.current_idx += 1;
-            (item, idx)
+            let item = state.items[idx].clone();
+            let cfg = state.config.clone();
+            (item, idx, cfg)
         };
 
-        let system_prompt = "You are a software engineer tasked with fixing a bug. Analyze the issue and generate a patch.";
-        let prompt = format!(
-            "Issue: {}
+        // Run outside lock scope — LLM calls run without holding the mutex
+        let (result, patch) = execute_one_impl(
+            idx,
+            &instance,
+            model,
+            tracker,
+            cfg,
+            |inst| serde_json::json!({ "instance_id": inst.instance_id }),
+        )?;
 
-{}",
-            instance.problem_statement, instance.base_commit
-        );
-        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        // Briefly lock just for HashMap insert
+        if let Some(p) = patch {
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            state.generated_patches.insert(idx, p);
+        }
+        Ok(Some(result))
+    }
 
-        let resolved = !response.is_empty(); // Simplified validation
-
-        Ok(Some(
-            TaskResult::new(
-                format!("task-{}", idx),
-                resolved,
-                if resolved { 1.0 } else { 0.0 },
-                vec![instance.repo.clone()],
-            )
-            .with_metadata(Some(serde_json::json!({
-                "instance_id": instance.instance_id, "correct": resolved,
-            }))),
-        ))
+    fn batch_evaluate(
+        &self,
+        task_results: &[TaskResult],
+        config: &yaml_serde::Value,
+    ) -> Result<Option<Vec<TaskResult>>> {
+        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        if state.generated_patches.is_empty() {
+            return Ok(None);
+        }
+        batch_evaluate_impl(
+            &state.items,
+            &state.generated_patches,
+            task_results,
+            state
+                .config
+                .as_ref()
+                .map(|c| c.dataset)
+                .unwrap_or(SweBenchDataset::Pro),
+            "SWE-Bench Pro",
+            config,
+        )
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
@@ -598,6 +516,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;
+        state.config = Some(cfg);
         Ok(())
     }
 
@@ -607,42 +526,56 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         _config: &yaml_serde::Value,
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
-        let (instance, idx) = {
+        let (instance, idx, cfg) = {
             let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
             let idx = state.current_idx;
-            let item = state.items[idx].clone();
             state.current_idx += 1;
-            (item, idx)
+            let item = state.items[idx].clone();
+            let cfg = state.config.clone();
+            (item, idx, cfg)
         };
 
-        let system_prompt = "You are a software engineer tasked with fixing a bug. Analyze the issue and generate a patch.";
-        let prompt = format!(
-            "Issue: {}
+        // Run outside lock scope — LLM calls run without holding the mutex
+        let (result, patch) = execute_one_impl(idx, &instance, model, tracker, cfg, |inst| {
+            serde_json::json!({
+                "instance_id": inst.instance_id,
+                "repo": inst.repo,
+                "language": get_language_for_repo(&inst.repo),
+            })
+        })?;
 
-{}",
-            instance.problem_statement, instance.base_commit
-        );
-        let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+        // Briefly lock just for HashMap insert
+        if let Some(p) = patch {
+            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            state.generated_patches.insert(idx, p);
+        }
+        Ok(Some(result))
+    }
 
-        let resolved = !response.is_empty(); // Simplified validation
-
-        Ok(Some(
-            TaskResult::new(
-                format!("task-{}", idx),
-                resolved,
-                if resolved { 1.0 } else { 0.0 },
-                vec![instance.repo.clone()],
-            )
-            .with_metadata(Some(serde_json::json!({
-                "instance_id": instance.instance_id,
-                "repo": instance.repo,
-                "language": get_language_for_repo(&instance.repo),
-                "correct": resolved,
-            }))),
-        ))
+    fn batch_evaluate(
+        &self,
+        task_results: &[TaskResult],
+        config: &yaml_serde::Value,
+    ) -> Result<Option<Vec<TaskResult>>> {
+        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        if state.generated_patches.is_empty() {
+            return Ok(None);
+        }
+        batch_evaluate_impl(
+            &state.items,
+            &state.generated_patches,
+            task_results,
+            state
+                .config
+                .as_ref()
+                .map(|c| c.dataset)
+                .unwrap_or(SweBenchDataset::Multilingual),
+            "SWE-Bench Multilingual",
+            config,
+        )
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
@@ -885,7 +818,7 @@ fn run_swebench_harness(
                 cfg.docker_socket_path.display()
             ));
         }
-        docker.mounts.push(DockerMount::direct_readwrite(
+        docker.mounts.push(DockerMount::direct_readonly(
             &cfg.docker_socket_path,
             "/var/run/docker.sock",
         ));
@@ -954,6 +887,233 @@ fn run_swebench_harness(
     })
 }
 
+/// Parse resolved instance IDs from SWE-Bench harness output JSON files.
+fn parse_harness_results(run_dir: &Path) -> Result<HashSet<String>> {
+    let mut json_files = Vec::new();
+    collect_json_files(run_dir, &mut json_files, 0)?;
+
+    let mut resolved_instance_ids: HashSet<String> = HashSet::new();
+    for path in &json_files {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<JsonValue>(&content) else {
+            continue;
+        };
+
+        // Check for resolved_ids arrays
+        for key in ["resolved_ids", "resolved", "resolved_instances"] {
+            if let Some(arr) = value.get(key).and_then(|v| v.as_array()) {
+                for id in arr {
+                    if let Some(s) = id.as_str() {
+                        resolved_instance_ids.insert(s.to_string());
+                    }
+                }
+            }
+        }
+
+        // Check for per-instance resolved: true fields
+        if let Some(obj) = value.as_object() {
+            for (k, v) in obj {
+                if let Some(true) = v.get("resolved").and_then(|r| r.as_bool()) {
+                    resolved_instance_ids.insert(k.clone());
+                }
+            }
+        }
+    }
+
+    Ok(resolved_instance_ids)
+}
+
+/// Default config for a given SWE-Bench dataset variant.
+fn default_config(dataset: SweBenchDataset) -> SweBenchConfig {
+    SweBenchConfig {
+        dataset,
+        dataset_id: String::new(),
+        split: String::new(),
+        num_samples: None,
+        token_env: None,
+        timeout_secs: 1800,
+        host_repo_path: None,
+        harness_image: String::new(),
+        build_images: false,
+        max_workers: 1,
+        docker_socket_path: PathBuf::from("/var/run/docker.sock"),
+        mount_docker_socket: false,
+        agent_mode: AgentMode::ZeroShot,
+        max_iterations: 50.min(MAX_ALLOWED_ITERATIONS),
+    }
+}
+
+/// Shared batch evaluation logic for all SWE-Bench variants.
+fn batch_evaluate_impl(
+    items: &[SweBenchInstance],
+    generated_patches: &HashMap<usize, String>,
+    task_results: &[TaskResult],
+    dataset: SweBenchDataset,
+    harness_label: &str,
+    config: &yaml_serde::Value,
+) -> Result<Option<Vec<TaskResult>>> {
+    // Build patch_pairs using index-based lookup
+    let mut patch_pairs: Vec<(SweBenchInstance, String, String)> = Vec::new();
+    for (idx, tr) in task_results.iter().enumerate() {
+        if let Some(patch) = generated_patches.get(&idx) {
+            if idx < items.len() {
+                let instance = &items[idx];
+                patch_pairs.push((instance.clone(), patch.clone(), tr.task_id.clone()));
+            }
+        }
+    }
+
+    if patch_pairs.is_empty() {
+        return Ok(None);
+    }
+
+    // Build O(1) lookup: task_id -> instance
+    let task_to_instance: HashMap<&str, &SweBenchInstance> = patch_pairs
+        .iter()
+        .map(|(instance, _, tid)| (tid.as_str(), instance))
+        .collect();
+
+    // Parse harness config
+    let cfg = parse_config(dataset, config)?;
+
+    // Create temporary working directory for harness I/O
+    let run_tempdir = tempfile::tempdir_in(
+        dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("llm-benchmark-runner"),
+    )
+    .context("failed to create temp dir for SWE-Bench harness")?;
+    let run_dir = run_tempdir.path();
+    let predictions_path = run_dir.join("predictions.jsonl");
+
+    // Write predictions.jsonl
+    {
+        let mut file = fs::File::create(&predictions_path)?;
+        for (instance, patch, _tid) in &patch_pairs {
+            let prediction = serde_json::json!({
+                "instance_id": instance.instance_id,
+                "model_name_or_path": "llm-benchmark-runner",
+                "model_patch": patch,
+            });
+            writeln!(file, "{}", serde_json::to_string(&prediction)?)?;
+        }
+    }
+    println!(
+        "  Running {} harness for {} patches...",
+        harness_label,
+        patch_pairs.len()
+    );
+
+    // Run the actual SWE-Bench harness
+    let harness_result = run_swebench_harness(&cfg, run_dir, &predictions_path)?;
+
+    if harness_result.timed_out {
+        eprintln!(
+            "  Warning: {} harness timed out after {} seconds",
+            harness_label, cfg.timeout_secs
+        );
+    }
+    if !harness_result.passed {
+        eprintln!(
+            "  Warning: {} harness exited with error: {}",
+            harness_label, harness_result.error_summary
+        );
+    }
+
+    // Parse resolved instance IDs from harness output
+    let resolved_instance_ids = parse_harness_results(run_dir)?;
+
+    println!(
+        "  {} harness: {} resolved / {} total ({:.1}%)",
+        harness_label,
+        resolved_instance_ids.len(),
+        patch_pairs.len(),
+        if patch_pairs.is_empty() {
+            0.0
+        } else {
+            resolved_instance_ids.len() as f64 / patch_pairs.len() as f64 * 100.0
+        }
+    );
+
+    // Map harness results back to TaskResults
+    let updated: Vec<TaskResult> = task_results
+        .iter()
+        .map(|tr| {
+            let mut updated = tr.clone();
+            if let Some(instance) = task_to_instance.get(tr.task_id.as_str()) {
+                updated.passed = resolved_instance_ids.contains(&instance.instance_id);
+                updated.score = if updated.passed { 1.0 } else { 0.0 };
+            }
+            updated
+        })
+        .collect();
+
+    Ok(Some(updated))
+}
+
+/// Shared execute_one logic for all SWE-Bench variants.
+/// Returns (TaskResult, Option<patch_string>). The patch is None if validation failed.
+fn execute_one_impl(
+    idx: usize,
+    instance: &SweBenchInstance,
+    model: &Model,
+    tracker: &mut TokenTracker,
+    config: Option<SweBenchConfig>,
+    metadata_builder: impl FnOnce(&SweBenchInstance) -> serde_json::Value,
+) -> Result<(TaskResult, Option<String>)> {
+    let cfg = config.unwrap_or_else(|| default_config(SweBenchDataset::Basic));
+
+    // Choose execution mode — handle agent loop failures gracefully
+    let patch = match cfg.agent_mode {
+        AgentMode::Bash => match execute_agent_loop(model, instance, &cfg, tracker) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("  Agent loop failed for {}: {}", instance.instance_id, e);
+                let task_id = format!("task-{}", idx);
+                return Ok((
+                    TaskResult::new(task_id, false, 0.0, vec![instance.repo.clone()])
+                        .with_metadata(Some(metadata_builder(instance))),
+                    None,
+                ));
+            }
+        },
+        AgentMode::ZeroShot => execute_zero_shot(model, instance, tracker)?,
+    };
+
+    // Validate patch content — if invalid, return failed task with no patch
+    if let Err(e) = validate_patch(&patch) {
+        eprintln!("  Patch validation failed for task-{}: {}", idx, e);
+        let task_id = format!("task-{}", idx);
+        return Ok((
+            TaskResult::new(task_id, false, 0.0, vec![instance.repo.clone()])
+                .with_metadata(Some(metadata_builder(instance))),
+            None,
+        ));
+    }
+
+    // Truncate oversized patches
+    let patch = if patch.len() > MAX_PATCH_BYTES {
+        eprintln!(
+            "  Warning: patch for task-{} exceeds {} bytes ({} bytes), truncating",
+            idx,
+            MAX_PATCH_BYTES,
+            patch.len()
+        );
+        patch[..MAX_PATCH_BYTES].to_string()
+    } else {
+        patch
+    };
+
+    let task_id = format!("task-{}", idx);
+    Ok((
+        TaskResult::new(task_id, false, 0.0, vec![instance.repo.clone()])
+            .with_metadata(Some(metadata_builder(instance))),
+        Some(patch),
+    ))
+}
+
 fn parse_config(dataset: SweBenchDataset, config: &yaml_serde::Value) -> Result<SweBenchConfig> {
     let docker_cfg = config.get("__docker");
     if docker_cfg
@@ -1016,6 +1176,26 @@ fn parse_config(dataset: SweBenchDataset, config: &yaml_serde::Value) -> Result<
         .and_then(|docker| docker.get("mount_docker_socket"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let agent_mode: AgentMode = config
+        .get("agent_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("zero-shot")
+        .parse()
+        .context("Invalid agent_mode: use 'zero-shot' or 'bash'")?;
+    let max_iterations = config
+        .get("max_iterations")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50)
+        .max(1) as usize;
+    let max_iterations = if max_iterations > MAX_ALLOWED_ITERATIONS {
+        eprintln!(
+            "  Warning: max_iterations {} exceeds maximum of {}, clamping",
+            max_iterations, MAX_ALLOWED_ITERATIONS
+        );
+        MAX_ALLOWED_ITERATIONS
+    } else {
+        max_iterations
+    };
     Ok(SweBenchConfig {
         dataset,
         dataset_id,
@@ -1029,6 +1209,8 @@ fn parse_config(dataset: SweBenchDataset, config: &yaml_serde::Value) -> Result<
         max_workers,
         docker_socket_path,
         mount_docker_socket,
+        agent_mode,
+        max_iterations,
     })
 }
 
@@ -1154,7 +1336,269 @@ fn extract_diff(response: &str) -> String {
     trimmed.to_string()
 }
 
-// Parse resolved count from a pre-collected list of JSON files (avoids duplicate directory traversal)
+/// Validate that a generated patch has the structure of a git diff.
+fn validate_patch(patch: &str) -> Result<()> {
+    if patch.trim().is_empty() {
+        return Err(anyhow::anyhow!("Generated patch is empty"));
+    }
+    if patch.len() < 20 {
+        return Err(anyhow::anyhow!(
+            "Generated patch is too short ({} bytes) to be a valid diff",
+            patch.len()
+        ));
+    }
+    // Check for basic unified diff markers in the first portion of the patch
+    let header = &patch[..patch.len().min(500)];
+    if !header.contains("--- ") || !header.contains("+++") {
+        return Err(anyhow::anyhow!(
+            "Generated patch does not appear to be a valid unified diff \
+             (missing '---'/'+++' markers)"
+        ));
+    }
+    Ok(())
+}
+
+/// Zero-shot mode: single prompt, extract diff from response.
+fn execute_zero_shot(
+    model: &Model,
+    instance: &SweBenchInstance,
+    tracker: &mut TokenTracker,
+) -> Result<String> {
+    let system_prompt = "You are a software engineer tasked with fixing a bug. Analyze the issue and generate a git diff patch.";
+    let prompt = format!(
+        "Issue: {}
+
+{}",
+        instance.problem_statement, instance.base_commit
+    );
+    let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
+    Ok(extract_diff(&response))
+}
+
+/// Set up the repository in the agent sandbox container.
+fn setup_agent_repo(container: &str, instance: &SweBenchInstance) -> Result<()> {
+    // Clone repository — propagate errors
+    let clone_cmd = format!(
+        "git clone --depth 1 https://github.com/{}.git /repo",
+        instance.repo
+    );
+    DockerRunner::exec(container, &clone_cmd)
+        .context(format!("failed to clone {}", instance.repo))?;
+
+    // Checkout base commit — propagate errors
+    let checkout_cmd = format!(
+        "cd /repo && git fetch --depth 1 origin {} && git checkout {}",
+        instance.base_commit, instance.base_commit
+    );
+    DockerRunner::exec(container, &checkout_cmd).context(format!(
+        "failed to checkout {} in {}",
+        instance.base_commit, instance.repo
+    ))?;
+
+    // Verify repository was set up correctly
+    let verify_result = DockerRunner::exec(container, "test -d /repo/.git && echo ok")
+        .context("failed to verify repository setup")?;
+    if !verify_result.trim().ends_with("ok") {
+        return Err(anyhow::anyhow!(
+            "repository verification failed: /repo/.git does not appear to exist"
+        ));
+    }
+
+    Ok(())
+}
+
+fn execute_agent_loop(
+    model: &Model,
+    instance: &SweBenchInstance,
+    cfg: &SweBenchConfig,
+    tracker: &mut TokenTracker,
+) -> Result<String> {
+    eprintln!(
+        "  SWE-Bench agent loop: {} (max {} iterations)",
+        instance.instance_id, cfg.max_iterations
+    );
+
+    // Start a sandbox container for this instance
+    let container_name = format!(
+        "llm-bench-agent-{}-{}",
+        instance.instance_id.replace(['/', '-'], "_"),
+        std::process::id()
+    );
+
+    let mut docker = DockerRunConfig::new(
+        &cfg.harness_image,
+        vec!["sleep".to_string(), "3600".to_string()], // keep alive
+        cfg.timeout_secs,
+    );
+    docker.read_only_root = true;
+    docker.network_none = true;
+    docker.cap_drop_all = true;
+    docker.no_new_privileges = true;
+    docker.pids_limit = Some(64);
+    docker.memory = Some("256m".to_string());
+    docker.tmpfs = vec!["/tmp:rw,noexec,nosuid,size=32m".to_string()];
+    docker.name_prefix = container_name.clone();
+
+    let container =
+        DockerRunner::run_detached(&docker).context("Failed to start agent sandbox container")?;
+
+    // Ensure cleanup even on error
+    struct ContainerGuard(String);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            let _ = DockerRunner::stop(&self.0);
+        }
+    }
+    let _guard = ContainerGuard(container.clone());
+
+    // Set up the repository in the container
+    setup_agent_repo(&container, instance)?;
+
+    // Bash tool definition
+    let bash_tool = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Execute a bash command in the repository environment. Working directory is the repository root. Use this to explore the codebase, search for relevant files, read code, and make edits.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The bash command to execute."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    });
+
+    let system_prompt = format!(
+        "You are an AI software engineer. You have access to a repository and can execute bash commands.
+
+The issue you need to fix:
+{}
+
+Repository: {}
+Base commit: {}
+
+Use commands like `ls`, `cat <file>`, `grep -r \"<pattern>\" .`, `find .`, `git log`, `git diff`.
+When you've identified the fix, use `git diff` to generate a patch and output it in a ```diff code block.
+If the fix is simple, you can use `sed` or write files directly.
+
+You have {} iterations maximum. Be efficient with your commands.",
+        instance.problem_statement,
+        instance.repo,
+        instance.base_commit,
+        cfg.max_iterations
+    );
+
+    // Initial user message
+    let initial_prompt =
+        "Starting exploration. First, run `ls -la` to see the repository structure, \
+         then find relevant files for the issue above. Use bash commands to explore."
+            .to_string();
+
+    let mut last_response = String::new();
+
+    for iteration in 0..cfg.max_iterations {
+        // Get model response with tools
+        let (response, tool_calls) = tracker.chat_completion_with_tools(
+            &model.model_name,
+            &system_prompt,
+            if iteration == 0 {
+                &initial_prompt
+            } else {
+                "Continue. Execute the next bash command or generate a patch if ready."
+            },
+            vec![bash_tool.clone()],
+            None,
+            true, // use_history
+        )?;
+
+        last_response = response.clone();
+
+        // Check if response contains a diff patch
+        let diff = extract_diff(&response);
+        if diff.len() > 100 && diff.starts_with("--- ") {
+            eprintln!(
+                "  Agent {} iteration {}: patch generated ({} bytes)",
+                instance.instance_id,
+                iteration,
+                diff.len()
+            );
+            return Ok(diff);
+        }
+
+        // Process tool calls with REAL execution
+        if !tool_calls.is_empty() {
+            for tc in &tool_calls {
+                // Parse bash command from tool call
+                let command = tc
+                    .arguments
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("echo 'no command'");
+
+                eprintln!(
+                    "  Agent {} iteration {}: bash > {}",
+                    instance.instance_id,
+                    iteration,
+                    command.chars().take(80).collect::<String>()
+                );
+
+                // Execute command (runs in Docker sandbox — cap_drop=ALL, network_none, read-only root)
+                let tool_result = match DockerRunner::exec(&container, command) {
+                    Ok(output) => {
+                        let truncated = truncate(&output, 8192);
+                        format!(
+                            "[Command succeeded, {} bytes output]\n{}",
+                            output.len(),
+                            truncated
+                        )
+                    }
+                    Err(e) => format!("[Command failed: {}]", e),
+                };
+
+                tracker.append_tool_result(&tc.id, &tool_result);
+            }
+        } else {
+            // No tool calls — just continue
+            eprintln!(
+                "  Agent {} iteration {}: no tool calls, continuing...",
+                instance.instance_id, iteration
+            );
+        }
+    }
+
+    // Max iterations reached — try git diff from container as fallback
+    eprintln!(
+        "  Agent {}: max iterations ({}) reached, extracting best patch",
+        instance.instance_id, cfg.max_iterations
+    );
+
+    // Try git diff from container as first fallback
+    if let Ok(container_diff) = DockerRunner::exec(&container, "git -C /repo diff") {
+        if container_diff.len() > 100 && container_diff.starts_with("--- ") {
+            return Ok(container_diff);
+        }
+    }
+
+    // Try extracting diff from last response
+    let diff = extract_diff(&last_response);
+    if diff.len() > 100 && diff.starts_with("--- ") {
+        return Ok(diff);
+    }
+
+    // No valid patch produced — return error so execute_one_impl handles gracefully
+    Err(anyhow::anyhow!(
+        "Agent {} did not produce a valid patch after {} iterations",
+        instance.instance_id,
+        cfg.max_iterations
+    ))
+}
+
+#[allow(dead_code)] // kept for future debugging of harness output
 fn parse_resolved_count_from_files(json_files: &[PathBuf]) -> Option<usize> {
     let mut best = None;
     for path in json_files {
@@ -1189,6 +1633,7 @@ fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Resul
 }
 
 // Parse resolved count from a single JSON result file
+#[allow(dead_code)] // kept for future debugging of harness output
 fn resolved_count_from_json(value: &JsonValue) -> Option<usize> {
     if let Some(n) = value.get("resolved").and_then(|v| v.as_u64()) {
         return Some(n as usize);
@@ -1295,15 +1740,6 @@ fn sanitize_path_component(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn truncate(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    let mut out: String = value.chars().take(max_chars).collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]
@@ -1436,5 +1872,70 @@ mod tests {
         assert_eq!(counts.get("PHP"), Some(&4));
         assert_eq!(counts.get("Ruby"), Some(&6));
         assert_eq!(counts.get("Rust"), Some(&7));
+    }
+
+    #[test]
+    fn validate_patch_rejects_empty() {
+        assert!(validate_patch("").is_err());
+        assert!(validate_patch("   \n  ").is_err());
+    }
+
+    #[test]
+    fn validate_patch_rejects_too_short() {
+        assert!(validate_patch("short").is_err());
+    }
+
+    #[test]
+    fn validate_patch_rejects_non_diff() {
+        assert!(validate_patch("This is not a diff\nbut looks long enough for the check").is_err());
+    }
+
+    #[test]
+    fn validate_patch_accepts_valid_diff() {
+        let diff = "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new";
+        assert!(validate_patch(diff).is_ok());
+    }
+
+    #[test]
+    fn extract_diff_from_markdown_fence() {
+        let response =
+            "Here's the fix:\n```diff\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n```";
+        let diff = extract_diff(response);
+        assert!(diff.contains("---"));
+        assert!(diff.contains("+++"));
+        assert!(!diff.contains("```"));
+    }
+
+    #[test]
+    fn extract_diff_from_generic_fence() {
+        let response = "```\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n```";
+        let diff = extract_diff(response);
+        assert!(diff.contains("---"));
+        assert!(!diff.contains("```"));
+    }
+
+    #[test]
+    fn extract_diff_returns_input_when_no_fence() {
+        let diff = "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new";
+        assert_eq!(extract_diff(diff), diff);
+    }
+
+    #[test]
+    fn agent_mode_from_str_variants() {
+        assert_eq!(
+            "zero-shot".parse::<AgentMode>().unwrap(),
+            AgentMode::ZeroShot
+        );
+        assert_eq!(
+            "zero_shot".parse::<AgentMode>().unwrap(),
+            AgentMode::ZeroShot
+        );
+        assert_eq!("bash".parse::<AgentMode>().unwrap(), AgentMode::Bash);
+        assert!("invalid".parse::<AgentMode>().is_err());
+    }
+
+    #[test]
+    fn agent_mode_default_is_zero_shot() {
+        assert_eq!(AgentMode::default(), AgentMode::ZeroShot);
     }
 }

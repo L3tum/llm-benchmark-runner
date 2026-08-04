@@ -4,3 +4,6 @@ benchmark_results/
 # Added by cargo
 
 /target
+
+# Backup files
+*.old

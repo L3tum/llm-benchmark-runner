@@ -224,4 +224,31 @@ fn new_benchmarks_are_registered() {
         get_benchmark("truthful_qa_gen").is_ok(),
         "truthful_qa_gen should be registered"
     );
+    // SWE-Bench variants
+    assert!(
+        get_benchmark("swebench").is_ok(),
+        "swebench should be registered"
+    );
+    assert!(
+        get_benchmark("swebench_verified").is_ok(),
+        "swebench_verified should be registered"
+    );
+    assert!(
+        get_benchmark("swebench_pro").is_ok(),
+        "swebench_pro should be registered"
+    );
+    assert!(
+        get_benchmark("swebench_multilingual").is_ok(),
+        "swebench_multilingual should be registered"
+    );
+    // Other benchmarks
+    assert!(get_benchmark("apps").is_ok(), "apps should be registered");
+    assert!(
+        get_benchmark("linux_kernel_security").is_ok(),
+        "linux_kernel_security should be registered"
+    );
+    assert!(
+        get_benchmark("multipl_e").is_ok(),
+        "multipl_e should be registered"
+    );
 }

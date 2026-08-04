@@ -1,7 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
 use crate::download::download_with_retry_bytes;
-use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{truncate, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -257,13 +257,4 @@ impl Benchmark for HarmBenchBenchmark {
             raw: raw.clone(),
         })
     }
-}
-
-fn truncate(text: &str, max_len: usize) -> String {
-    if text.chars().count() <= max_len {
-        return text.to_string();
-    }
-    let mut result: String = text.chars().take(max_len).collect();
-    result.push('…');
-    result
 }

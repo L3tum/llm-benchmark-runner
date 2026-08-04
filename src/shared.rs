@@ -45,6 +45,7 @@ pub enum BenchmarkCategory {
     Hallucination,
     Translation,
     Safety,
+    Security,
     ToolUse,
     StringManipulation,
     Other(String),
@@ -65,6 +66,7 @@ impl BenchmarkCategory {
             Self::Hallucination => "Hallucination".to_string(),
             Self::Translation => "Translation".to_string(),
             Self::Safety => "Safety".to_string(),
+            Self::Security => "Security".to_string(),
             Self::ToolUse => "Tool-Use".to_string(),
             Self::StringManipulation => "String-Manipulation".to_string(),
             Self::Other(s) => s.clone(),
@@ -90,6 +92,7 @@ impl BenchmarkCategory {
             "Hallucination" => Self::Hallucination,
             "Translation" => Self::Translation,
             "Safety" => Self::Safety,
+            "Security" => Self::Security,
             "Tool-Use" => Self::ToolUse,
             "String-Manipulation" => Self::StringManipulation,
             other => Self::Other(other.to_string()),
@@ -568,6 +571,17 @@ pub fn fence_prompt_value(value: &str) -> String {
     format!("<value>{}</value>", value)
 }
 
+/// Truncate a string to `max_chars` characters, appending '…' if truncated.
+/// Uses character-aware truncation (not byte-aware) for correct Unicode handling.
+pub fn truncate(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out: String = value.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod fence_prompt_value_tests {
     use super::*;
@@ -588,6 +602,41 @@ mod fence_prompt_value_tests {
             fence_prompt_value("<script>alert('xss')</script>"),
             "<value><script>alert('xss')</script></value>"
         );
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_length_unchanged() {
+        assert_eq!(truncate("12345", 5), "12345");
+    }
+
+    #[test]
+    fn truncate_long_string_appends_ellipsis() {
+        assert_eq!(truncate("hello world", 5), "hello…");
+    }
+
+    #[test]
+    fn truncate_unicode_characters() {
+        assert_eq!(truncate("你好世界", 2), "你好…");
+    }
+
+    #[test]
+    fn truncate_empty_string() {
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn truncate_zero_max() {
+        assert_eq!(truncate("hello", 0), "…");
     }
 }
 

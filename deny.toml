@@ -9,6 +9,7 @@ allow = [
     "Unicode-3.0",
     "MPL-2.0",
     "CDLA-Permissive-2.0",
+    "CC0-1.0",
 ]
 
 [bans]
@@ -17,3 +18,6 @@ multiple-versions = "warn"
 
 [advisories]
 # Block crates with unresolved security advisories
+# paste is unmaintained (RUSTSEC-2024-0436) but is a transitive dep of parquet
+# with no safe upgrade available — ignore until parquet removes it
+ignore = ["RUSTSEC-2024-0436"]

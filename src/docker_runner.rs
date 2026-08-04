@@ -40,6 +40,17 @@ impl DockerMount {
             map_host_repo_path: false,
         }
     }
+
+    /// Direct mount (no host repo path mapping) with read-only access.
+    /// Used for the Docker socket to prevent container escape via DinD.
+    pub fn direct_readonly(source: impl Into<PathBuf>, target: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+            readonly: true,
+            map_host_repo_path: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

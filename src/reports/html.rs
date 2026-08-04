@@ -451,6 +451,7 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
         | BenchmarkCategory::Hallucination
         | BenchmarkCategory::Translation
         | BenchmarkCategory::Safety
+        | BenchmarkCategory::Security
         | BenchmarkCategory::ToolUse
         | BenchmarkCategory::StringManipulation => CategoryData {
             name: cat.display().to_string(),
