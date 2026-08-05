@@ -1,9 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
@@ -83,18 +84,21 @@ struct MC2Item {
 
 /// Extract a single answer letter from a model response using regex patterns.
 /// Returns the first letter found in patterns: "The answer is (X)" → "Answer: X" → last isolated A-Z.
+static RE_ANSWER_IS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)answer\s+(?:is)?\s*[:\s\(]?\s*([A-Z])").unwrap());
+static RE_ANSWER_COLON: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\banswer:\s*([A-Z])").unwrap());
+static RE_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-Z])\b").unwrap());
+
 fn extract_answer(text: &str) -> Option<char> {
     // Pattern 1: "The answer is (X)" or "The answer is X"
-    let re1 = Regex::new(r"(?i)answer\s+(?:is)?\s*[:\s\(]?\s*([A-Z])").ok()?;
-    if let Some(caps) = re1.captures(text) {
+    if let Some(caps) = RE_ANSWER_IS.captures(text) {
         if let Some(m) = caps.get(1) {
             return m.as_str().chars().next();
         }
     }
 
     // Pattern 2: "Answer: X" (last occurrence)
-    let re2 = Regex::new(r"(?i)\banswer:\s*([A-Z])").ok()?;
-    let last = re2.captures_iter(text).last();
+    let last = RE_ANSWER_COLON.captures_iter(text).last();
     if let Some(caps) = last {
         if let Some(m) = caps.get(1) {
             return m.as_str().chars().next();
@@ -102,8 +106,7 @@ fn extract_answer(text: &str) -> Option<char> {
     }
 
     // Pattern 3: last isolated letter (word boundary)
-    let re3 = Regex::new(r"\b([A-Z])\b").ok()?;
-    let last = re3.captures_iter(text).last();
+    let last = RE_LETTER.captures_iter(text).last();
     if let Some(caps) = last {
         if let Some(m) = caps.get(1) {
             return m.as_str().chars().next();
@@ -113,27 +116,101 @@ fn extract_answer(text: &str) -> Option<char> {
     None
 }
 
-fn load_truthfulqa() -> TruthfulQADataset {
+fn load_truthfulqa() -> Result<TruthfulQADataset> {
+    use anyhow::Context;
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("truthfulqa");
-    let path = cache_dir.join("multiple_choice.json");
+    let path = cache_dir.join("multiple_choice_rows.json");
+    let url =
+        "https://huggingface.co/datasets/truthfulqa/truthful_qa/resolve/main/multiple_choice/validation-00000-of-00001.parquet";
 
-    if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached TruthfulQA");
-        return serde_json::from_str(&content).expect("Failed to parse cached TruthfulQA");
+    let rows: Vec<serde_json::Value> = if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        serde_json::from_str(&content).context("parse cached TruthfulQA")?
+    } else {
+        fs::create_dir_all(&cache_dir).context("create truthfulqa cache dir")?;
+        println!("  Downloading TruthfulQA dataset...");
+        let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
+            .context("download TruthfulQA parquet")?;
+        fs::write(&path, serde_json::to_vec(&rows)?).context("save TruthfulQA cache")?;
+        rows
+    };
+
+    fn choices(t: &serde_json::Value) -> Vec<String> {
+        t.get("choices")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn labels(t: &serde_json::Value) -> Vec<i64> {
+        t.get("labels")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+            .unwrap_or_default()
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-    println!("  Downloading TruthfulQA dataset...");
-    let url =
-        "https://huggingface.co/datasets/truthfulqa/truthful_qa/resolve/main/multiple_choice.csv";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-        .expect("Failed to download TruthfulQA");
-    fs::write(&path, &bytes).expect("Failed to save TruthfulQA");
-    let content = fs::read_to_string(&path).expect("Failed to read TruthfulQA");
-    serde_json::from_str(&content).expect("Failed to parse TruthfulQA")
+    let mut mc1 = Vec::new();
+    let mut mc2 = Vec::new();
+    for r in &rows {
+        let question = r
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(t) = r.get("mc1_targets") {
+            let ch = choices(t);
+            let lb = labels(t);
+            let correct: Vec<String> = ch
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| lb.get(*i) == Some(&1))
+                .map(|(_, c)| c.clone())
+                .collect();
+            let incorrect: Vec<String> = ch
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| lb.get(*i) == Some(&0))
+                .map(|(_, c)| c.clone())
+                .collect();
+            mc1.push(MC1Item {
+                question: question.clone(),
+                best_answer: correct.first().cloned().unwrap_or_default(),
+                correct_answers: correct,
+                incorrect_answers: incorrect,
+            });
+        }
+
+        if let Some(t) = r.get("mc2_targets") {
+            let ch = choices(t);
+            let lb = labels(t);
+            mc2.push(MC2Item {
+                question: question.clone(),
+                answers: ch.clone(),
+                labels: ch
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        if lb.get(i) == Some(&1) {
+                            "True".to_string()
+                        } else {
+                            "False".to_string()
+                        }
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    Ok(TruthfulQADataset {
+        multiple_choice: MultipleChoiceData { mc1, mc2 },
+    })
 }
 
 impl Benchmark for TruthfulQABenchmark {
@@ -150,7 +227,7 @@ impl Benchmark for TruthfulQABenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let dataset = load_truthfulqa();
+        let dataset = load_truthfulqa()?;
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = dataset.multiple_choice.mc1;
         state.current_idx = 0;
@@ -355,7 +432,7 @@ impl Benchmark for TruthfulQAMC2Benchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let dataset = load_truthfulqa();
+        let dataset = load_truthfulqa()?;
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = dataset.multiple_choice.mc2;
         state.current_idx = 0;

@@ -293,7 +293,7 @@ Options: `--results` (results JSON path), `--output` (output directory), `--conf
 
 ## Available Benchmarks
 
-All benchmarks are registered by name and can be listed with the `benchmarks` key in your config. **60 benchmarks** are available across 14 categories.
+All benchmarks are registered by name and can be listed with the `benchmarks` key in your config. **59 benchmarks** are available across 14 categories. (A further 4 benchmarks are *disabled* — see [Disabled Benchmarks](#disabled-benchmarks) below.)
 
 ### Knowledge (9)
 
@@ -357,13 +357,11 @@ All benchmarks are registered by name and can be listed with the `benchmarks` ke
 | SNLI | `snli` | Stanford Natural Language Inference — determine if a hypothesis is entailed, contradicted, or neutral. |
 | TruthfulQA (MC1) | `truthful_qa` | Multiple-choice truthfulness evaluation (single-answer variant). |
 
-### Research (4)
+### Research (2)
 
 | Benchmark | Config Key | Description |
 |---|---|---|
-| FactBench | `factbench` | In-the-wild factuality evaluation from real-world queries. |
 | RULER | `ruler` | Retrieval and Long-context Evaluation — needle-in-haystack and retrieval benchmarks at varying context lengths. |
-| SciFact | `scifact` | Scientific claim verification — judge whether evidence supports a scientific claim. |
 | PopQA | `popqa` | Knowledge-based QA from Wikipedia-derived popular entities. |
 
 ### Similarity (1)
@@ -378,7 +376,7 @@ All benchmarks are registered by name and can be listed with the `benchmarks` ke
 |---|---|---|
 | IFEval | `ifeval` | ~1,000 prompts with verifiable constraints (word count, keywords, formatting). Measures instruction adherence. |
 
-### Hallucination (14)
+### Hallucination (13)
 
 | Benchmark | Config Key | Description |
 |---|---|---|
@@ -387,7 +385,6 @@ All benchmarks are registered by name and can be listed with the `benchmarks` ke
 | FaithDial | `faithdial` | Faithfulness evaluation for dialog summarization. |
 | HaluBench | `halubench` | RAG hallucination detection across multiple knowledge domains. |
 | HaluEval | `halueval` | Hallucination evaluation via QA on model-generated text. |
-| HDM-Bench | `hdm_bench` | Hallucination detection in multi-document settings. |
 | SQuAD 2.0 | `squad_v2` | Stanford QA dataset v2 with unanswerable questions. Tests both answer accuracy and refusal behavior. |
 | Tool Hallucination | `tool_hallucination` | Tests whether models truthfully report tool failures across varying numbers of tool calls. |
 | True-False | `true_false` | Binary fact verification — determine if statements are true or false. |
@@ -409,11 +406,10 @@ All benchmarks are registered by name and can be listed with the `benchmarks` ke
 |---|---|---|
 | HarmBench | `harmbench` | Safety evaluation. Sends ~500 harmful behavior prompts as "How to \<goal\>". Measures refusal rate. |
 
-### Tool Use (2)
+### Tool Use (1)
 
 | Benchmark | Config Key | Description |
 |---|---|---|
-| StableToolBench | `stable_toolbench` | Tool/API selection and parameter completion from ~1.2K instances across 6 subsets. |
 | TerminalBench 2.1 | `terminal_bench` | Agentic terminal tasks — model executes shell commands iteratively via tool calls to complete tasks. |
 
 ### String Manipulation (9)
@@ -429,6 +425,19 @@ All benchmarks are registered by name and can be listed with the `benchmarks` ke
 | Reverse Writing | `reverse` | Reverse the characters of a given word/string. |
 | Reverse Writing (Tools) | `reverse_tools` | Reverse writing with tool-calling interface. |
 
+## Disabled Benchmarks
+
+These benchmarks were removed from the registry (disabled) and are **not available** for runs. Their registration and module compilation are turned off in `src/benchmarks/mod.rs`. They were disabled because the upstream data source was unavailable, unsuitable, or not aligned with the suite's goals.
+
+| Benchmark | Config Key | Category | Reason disabled |
+|---|---|---|---|
+| FactBench | `factbench` | Research | Data is tiered CSV (`user_prompts`/`hallucination_score`) that doesn't fit the claim/label task schema; regarded as low-value. |
+| SciFact | `scifact` | Research | Primarily an RAG/retrieval benchmark; not aligned with the suite's evaluation goals. |
+| HDM-Bench | `hdm_bench` | Hallucination | Dataset is AI-generated (low value) and its HF parquet shards are corrupt/unreadable. |
+| StableToolBench | `stable_toolbench` | Tool Use | Upstream data source could not be located; solvable-queries API is unavailable. |
+
+To re-enable a benchmark, restore its `pub mod <name>;` declaration and its `map.insert("...", ...)` registration in `src/benchmarks/mod.rs`, and re-add the corresponding dataset source/loader.
+
 ---
 
 ### Detailed Benchmark Guides
@@ -438,6 +447,19 @@ All benchmarks are registered by name and can be listed with the `benchmarks` ke
 Auto-downloaded from HuggingFace (`TIGER-Lab/MMLU-Pro`). Supports up to 10 options (A–J), few-shot chain-of-thought prompting, and per-subject accuracy reporting.
 
 **Config options:** `num_samples`, `subjects` (comma-separated subjects, `null` = all).
+
+#### MMLU-ProX (`mmlu_prox`)
+
+Multilingual extension of MMLU-Pro covering **29 languages** (`af, ar, bn, cs, de, en, es, fr, hi, hu, id, it, ja, ko, mr, ne, pt, ru, sr, sw, te, th, uk, ur, vi, wo, yo, zh, zu`). Each language is downloaded as a per-language shard and evaluated separately, with a per-language accuracy breakdown in the report.
+
+**Config options:** `languages` — comma-separated list of language codes to evaluate (e.g., `languages: "en,zh"`). If omitted, all 29 languages are evaluated.
+
+Example:
+```yaml
+benchmark:
+  mmlu_prox:
+    languages: "en,zh,de"
+```
 
 #### KLD Divergence (`kld`)
 
@@ -572,13 +594,6 @@ Dataset downloaded from `harbor-framework/terminal-bench-2-1` on GitHub and cach
 
 **Config options:** `num_samples` (89 total), `max_iterations` (max tool-call turns per task, default 50), `timeout_secs` (per-task timeout, default 900), `categories` (filter by category: `file_management`, `shell_commands`, `debugging`, `programming`, `data_processing`, `linux`, `other`).
 
-#### StableToolBench (`stable_toolbench`)
-
-Evaluates **tool/API selection and parameter completion** from the THUNLP-MT/StableToolBench dataset. Each instance presents a natural-language query along with a catalog of available APIs. The model is expected to select the correct tool(s) and provide appropriate parameters via structured function calling. Metrics include simulated pass rate, tool selection accuracy, API precision/recall/F1, and parameter completeness.
-
-Dataset downloaded directly from `THUNLP-MT/StableToolBench/solvable_queries/` on GitHub (~1.2K instances across 6 subsets: G1_instruction, G1_category, G1_tool, G2_category, G2_instruction, G3_instruction).
-
-**Config options:** `num_samples`, `subsets` (comma-separated subset names), `categories` (filter by domain).
 
 ## Legacy: `coding_eval` (umbrella)
 

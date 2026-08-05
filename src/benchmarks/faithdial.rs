@@ -4,7 +4,7 @@ use crate::download::download_with_retry_bytes;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for FaithDialBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FaithDialItem {
     context: String,  // dialogue with background knowledge
     response: String, // assistant response
@@ -42,6 +42,7 @@ fn load_faithdial_dataset() -> Vec<FaithDialItem> {
         .join("llm-benchmark-runner")
         .join("faithdial");
     let path = cache_dir.join("faithdial.json");
+    let url = "https://huggingface.co/datasets/McGill-NLP/FaithDial/resolve/main/data/test.json";
 
     if path.exists() {
         let content = fs::read_to_string(&path).expect("Failed to read cached FaithDial");
@@ -50,13 +51,77 @@ fn load_faithdial_dataset() -> Vec<FaithDialItem> {
 
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
     println!("  Downloading FaithDial dataset...");
-    let url = "https://huggingface.co/datasets/dataframer/faithdial/resolve/main/faithdial.json";
     let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
         .expect("Failed to download FaithDial");
 
-    let items: Vec<FaithDialItem> =
-        serde_json::from_slice(&bytes).expect("Failed to parse FaithDial");
-    fs::write(&path, bytes).expect("Failed to save FaithDial");
+    // McGill-NLP/FaithDial test.json: list of {utterances:[...], dialog_idx}.
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("Failed to parse FaithDial");
+    let mut items = Vec::new();
+    if let Some(dialogues) = doc.as_array() {
+        for dlg in dialogues {
+            let Some(utts) = dlg.get("utterances").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for u in utts {
+                let response = u
+                    .get("response")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if response.is_empty() {
+                    continue;
+                }
+                let knowledge = u
+                    .get("knowledge")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let history: String = u
+                    .get("history")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                let context = if knowledge.is_empty() {
+                    history
+                } else {
+                    format!(
+                        "{}
+{}",
+                        history, knowledge
+                    )
+                };
+                let hallucinated = u
+                    .get("BEGIN")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter().filter_map(|x| x.as_str()).any(|s| {
+                            let l = s.to_lowercase();
+                            l.contains("contradiction") || l.contains("hallucination")
+                        })
+                    })
+                    .unwrap_or(false);
+                items.push(FaithDialItem {
+                    context,
+                    response,
+                    label: if hallucinated {
+                        "1".to_string()
+                    } else {
+                        "0".to_string()
+                    },
+                });
+            }
+        }
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec(&items).expect("Failed to save FaithDial"),
+    )
+    .expect("Failed to save FaithDial");
     items
 }
 

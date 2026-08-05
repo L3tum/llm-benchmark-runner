@@ -41,7 +41,7 @@ pub struct DockerConfig {
     pub max_workers: usize,
     #[serde(default = "default_docker_socket_path")]
     pub docker_socket_path: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub mount_docker_socket: bool,
 }
 
@@ -55,13 +55,17 @@ impl Default for DockerConfig {
             build_images: false,
             max_workers: default_max_workers(),
             docker_socket_path: default_docker_socket_path(),
-            mount_docker_socket: true,
+            mount_docker_socket: false,
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_docker_timeout_secs() -> u64 {

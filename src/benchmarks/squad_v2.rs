@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for SquadV2Benchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // title field kept for schema alignment
 struct SquadV2Item {
     title: String,
@@ -39,77 +39,78 @@ struct SquadV2Item {
     is_impossible: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // answer_start kept for schema alignment
 struct SquadV2Answer {
     text: String,
     answer_start: i64,
 }
 
-fn load_squad_v2() -> Vec<SquadV2Item> {
+fn load_squad_v2() -> Result<Vec<SquadV2Item>> {
+    use anyhow::Context;
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("squad_v2");
     let path = cache_dir.join("SQuAD2.0.json");
+    let url =
+        "https://huggingface.co/datasets/rajpurkar/squad_v2/resolve/main/squad_v2/validation-00000-of-00001.parquet";
 
-    let parsed: SQuADDataset = if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached SQuAD 2.0");
-        serde_json::from_str(&content).expect("Failed to parse SQuAD 2.0")
-    } else {
-        fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-        println!("  Downloading SQuAD 2.0 dataset...");
-        let url =
-            "https://huggingface.co/datasets/rajpurkar/squad_v2/resolve/main/data/dev-v2.0.json";
-        let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-            .expect("Failed to download SQuAD 2.0");
-
-        let parsed: SQuADDataset =
-            serde_json::from_slice(&bytes).expect("Failed to parse SQuAD 2.0");
-        fs::write(&path, &bytes).expect("Failed to save SQuAD 2.0");
-        parsed
-    };
-
-    let mut items = Vec::new();
-    for data_item in &parsed.data {
-        for paragraph in &data_item.paragraphs {
-            for qa in &paragraph.qas {
-                items.push(SquadV2Item {
-                    title: data_item.title.clone(),
-                    context: paragraph.context.clone(),
-                    question: qa.question.clone(),
-                    answers: qa.answers.clone(),
-                    is_impossible: qa.is_impossible,
-                });
-            }
-        }
+    if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        return serde_json::from_str(&content).context("parse cached SQuAD 2.0");
     }
-    items
-}
 
-#[derive(Debug, Deserialize)]
-struct SQuADDataset {
-    data: Vec<SQuADDataItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SQuADDataItem {
-    title: String,
-    paragraphs: Vec<SQuADParagraph>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SQuADParagraph {
-    context: String,
-    qas: Vec<SQuADQA>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SQuADQA {
-    question: String,
-    #[serde(default)]
-    is_impossible: Option<bool>,
-    answers: Option<Vec<SquadV2Answer>>,
+    fs::create_dir_all(&cache_dir).context("create squad cache dir")?;
+    println!("  Downloading SQuAD 2.0 dataset...");
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
+        .context("download SQuAD parquet")?;
+    let items: Vec<SquadV2Item> = rows
+        .iter()
+        .map(|r| {
+            let answers: Vec<SquadV2Answer> = r
+                .get("answers")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|ans| SquadV2Answer {
+                            text: ans
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            answer_start: ans
+                                .get("answer_start")
+                                .and_then(|t| t.as_i64())
+                                .unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let is_impossible = answers.is_empty();
+            SquadV2Item {
+                title: r
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                context: r
+                    .get("context")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                question: r
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                answers: Some(answers),
+                is_impossible: Some(is_impossible),
+            }
+        })
+        .collect();
+    fs::write(&path, serde_json::to_vec(&items)?).context("save SQuAD cache")?;
+    Ok(items)
 }
 
 impl Benchmark for SquadV2Benchmark {
@@ -126,7 +127,7 @@ impl Benchmark for SquadV2Benchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let items = load_squad_v2();
+        let items = load_squad_v2()?;
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;

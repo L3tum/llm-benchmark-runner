@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,51 +29,52 @@ impl Default for NQOpenBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NQOpenItem {
     question: String,
     answers: Vec<String>,
 }
 
-fn load_nq_open() -> Vec<NQOpenItem> {
+fn load_nq_open() -> Result<Vec<NQOpenItem>> {
+    use anyhow::Context;
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("nq_open");
     let path = cache_dir.join("NQ-Open.json");
+    let url =
+        "https://huggingface.co/datasets/nq_open/resolve/main/nq_open/validation-00000-of-00001.parquet";
 
     if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached NQ-Open");
-        return serde_json::from_str(&content).expect("Failed to parse NQ-Open");
+        let content = fs::read_to_string(&path)?;
+        return serde_json::from_str(&content).context("parse cached NQ-Open");
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    fs::create_dir_all(&cache_dir).context("create nq_open cache dir")?;
     println!("  Downloading NQ-Open dataset...");
-    let url = "https://huggingface.co/datasets/nq_open/resolve/main/data/test.csv";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-        .expect("Failed to download NQ-Open");
-
-    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(b',')
-        .has_headers(true)
-        .from_reader(content.as_bytes());
-    let mut items = Vec::new();
-    for record in reader.records().flatten() {
-        if record.len() >= 2 {
-            let question = record.get(0).unwrap_or("").to_string();
-            let answers_str = record.get(1).unwrap_or("").to_string();
-            let answers = answers_str
-                .split("\\t")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            items.push(NQOpenItem { question, answers });
-        }
-    }
-
-    fs::write(&path, &bytes).expect("Failed to save NQ-Open");
-    items
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
+        .context("download NQ-Open parquet")?;
+    let items: Vec<NQOpenItem> = rows
+        .iter()
+        .map(|r| NQOpenItem {
+            question: r
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            answers: r
+                .get("answer")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect();
+    fs::write(&path, serde_json::to_vec(&items)?).context("save NQ-Open cache")?;
+    Ok(items)
 }
 
 impl Benchmark for NQOpenBenchmark {
@@ -90,7 +91,7 @@ impl Benchmark for NQOpenBenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let items = load_nq_open();
+        let items = load_nq_open()?;
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;

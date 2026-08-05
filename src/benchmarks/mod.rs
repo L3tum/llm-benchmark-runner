@@ -19,7 +19,7 @@ pub mod coding_eval;
 pub mod cruxeval;
 pub mod ea_mt;
 pub mod efficient_language;
-pub mod factbench;
+// pub mod factbench; // DISABLED: RAG-style benchmark; not useful for this suite
 pub mod faithdial;
 pub mod fever;
 pub mod fictional_language;
@@ -27,7 +27,7 @@ pub mod gpqa;
 pub mod halubench;
 pub mod halueval;
 pub mod harmbench;
-pub mod hdm_bench;
+// pub mod hdm_bench; // DISABLED: AI-generated benchmark; not useful
 pub mod hex;
 pub mod ifeval;
 pub mod kld;
@@ -44,10 +44,10 @@ pub mod popqa;
 pub mod race;
 pub mod reverse;
 pub mod ruler;
-pub mod scifact;
+// pub mod scifact; // DISABLED: primarily for RAG benchmarks
 pub mod snli;
 pub mod squad_v2;
-pub mod stable_toolbench;
+// pub mod stable_toolbench; // DISABLED: data source unavailable
 pub mod supergpqa;
 pub mod svg_benchmarks;
 pub mod swe_bench;
@@ -278,10 +278,6 @@ fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
             Box::new(terminal_bench::TerminalBenchBenchmark::new()) as Box<dyn Benchmark>,
         );
         map.insert(
-            "stable_toolbench".to_string(),
-            Box::new(stable_toolbench::StableToolBenchBenchmark::new()) as Box<dyn Benchmark>,
-        );
-        map.insert(
             "truthful_qa".to_string(),
             Box::new(truthful_qa::TruthfulQABenchmark::default()) as Box<dyn Benchmark>,
         );
@@ -304,10 +300,6 @@ fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
         map.insert(
             "faithdial".to_string(),
             Box::new(faithdial::FaithDialBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "hdm_bench".to_string(),
-            Box::new(hdm_bench::HdmBenchBenchmark::default()) as Box<dyn Benchmark>,
         );
         map.insert(
             "nq_open".to_string(),
@@ -347,10 +339,6 @@ fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
         );
         // --- New benchmarks: Research & Hallucination suite ---
         map.insert(
-            "scifact".to_string(),
-            Box::new(scifact::SciFactBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
             "snli".to_string(),
             Box::new(snli::SnliBenchmark::default()) as Box<dyn Benchmark>,
         );
@@ -382,10 +370,6 @@ fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
             "linux_kernel_security".to_string(),
             Box::new(linux_kernel_security::LinuxKernelSecurityBenchmark::default())
                 as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "factbench".to_string(),
-            Box::new(factbench::FactBenchBenchmark::default()) as Box<dyn Benchmark>,
         );
         map.insert(
             "truthful_qa_gen".to_string(),

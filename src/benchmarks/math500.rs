@@ -4,6 +4,7 @@ use crate::download::download_with_retry_bytes;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -77,7 +78,11 @@ impl Benchmark for Math500Benchmark {
 
         let data_path = self.download_dataset()?;
         let content = fs::read_to_string(&data_path)?;
-        let all_items: Vec<Math500Item> = serde_json::from_str(&content)?;
+        // MATH-500 is shipped as JSONL (one object per line).
+        let all_items: Vec<Math500Item> = content
+            .lines()
+            .map(serde_json::from_str::<Math500Item>)
+            .collect::<Result<Vec<_>, _>>()?;
         let all_data = group_by_subject(all_items);
 
         let subjects_to_eval: Vec<String> = if let Some(subj) = &subjects {
@@ -328,14 +333,13 @@ impl Math500Benchmark {
             .join("llm-benchmark-runner")
             .join("math500");
         fs::create_dir_all(&cache_dir)?;
-        let path = cache_dir.join("MATH-500.json");
+        let path = cache_dir.join("MATH-500.jsonl");
         if path.exists() {
             return Ok(path);
         }
 
-        // Download from HuggingFaceH4/MATH-500
-        let url =
-            "https://huggingface.co/datasets/HuggingFaceH4/MATH-500/resolve/main/MATH-500.json";
+        // Download from HuggingFaceH4/MATH-500 (JSONL)
+        let url = "https://huggingface.co/datasets/HuggingFaceH4/MATH-500/resolve/main/test.jsonl";
         println!("  Downloading MATH-500 data...");
         let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")?;
         fs::write(&path, bytes)?;
@@ -343,12 +347,13 @@ impl Math500Benchmark {
     }
 }
 
+static RE_BOXED: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\boxed\{(\d+)\}").unwrap());
+
 /// Extract integer answer from boxed notation like \boxed{123}.
 fn extract_int_answer(text: &str) -> Option<String> {
-    let re = Regex::new(r"\\boxed\{(\d+)\}")
-        .ok()
-        .and_then(|r| r.captures_iter(text).last())
+    RE_BOXED
+        .captures_iter(text)
+        .last()
         .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().to_string());
-    re
+        .map(|m| m.as_str().to_string())
 }

@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for RaceBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RaceItem {
     passage: String,
     question: String,
@@ -40,64 +40,62 @@ struct RaceItem {
     answer: String,
 }
 
-fn load_race_dataset() -> Vec<RaceItem> {
+fn load_race_dataset() -> Result<Vec<RaceItem>> {
+    use anyhow::Context;
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("race");
-    let path = cache_dir.join("test.csv");
+    let path = cache_dir.join("race.json");
+    let url =
+        "https://huggingface.co/datasets/ehovy/race/resolve/main/all/test-00000-of-00001.parquet";
 
     if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached RACE");
-        let mut reader = csv::ReaderBuilder::new()
-            .delimiter(b',')
-            .has_headers(true)
-            .from_reader(content.as_bytes());
-        let mut items = Vec::new();
-        for record in reader.records().flatten() {
-            if record.len() >= 7 {
-                items.push(RaceItem {
-                    passage: record.get(0).unwrap_or("").to_string(),
-                    question: record.get(1).unwrap_or("").to_string(),
-                    option_a: record.get(2).unwrap_or("").to_string(),
-                    option_b: record.get(3).unwrap_or("").to_string(),
-                    option_c: record.get(4).unwrap_or("").to_string(),
-                    option_d: record.get(5).unwrap_or("").to_string(),
-                    answer: record.get(6).unwrap_or("").to_string(),
-                });
-            }
-        }
-        return items;
+        let content = fs::read_to_string(&path)?;
+        return serde_json::from_str(&content).context("parse cached RACE");
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    fs::create_dir_all(&cache_dir).context("create race cache dir")?;
     println!("  Downloading RACE dataset...");
-    let url = "https://huggingface.co/datasets/ehovy/race/resolve/main/test.csv";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-        .expect("Failed to download RACE");
-
-    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(b',')
-        .has_headers(true)
-        .from_reader(content.as_bytes());
-    let mut items = Vec::new();
-    for record in reader.records().flatten() {
-        if record.len() >= 7 {
-            items.push(RaceItem {
-                passage: record.get(0).unwrap_or("").to_string(),
-                question: record.get(1).unwrap_or("").to_string(),
-                option_a: record.get(2).unwrap_or("").to_string(),
-                option_b: record.get(3).unwrap_or("").to_string(),
-                option_c: record.get(4).unwrap_or("").to_string(),
-                option_d: record.get(5).unwrap_or("").to_string(),
-                answer: record.get(6).unwrap_or("").to_string(),
-            });
-        }
-    }
-
-    fs::write(&path, &bytes).expect("Failed to save RACE");
-    items
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
+        .context("download RACE parquet")?;
+    let items: Vec<RaceItem> = rows
+        .iter()
+        .map(|r| {
+            let opts: Vec<String> = r
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            RaceItem {
+                passage: r
+                    .get("article")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                question: r
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                option_a: opts.first().cloned().unwrap_or_default(),
+                option_b: opts.get(1).cloned().unwrap_or_default(),
+                option_c: opts.get(2).cloned().unwrap_or_default(),
+                option_d: opts.get(3).cloned().unwrap_or_default(),
+                answer: r
+                    .get("answer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        })
+        .collect();
+    fs::write(&path, serde_json::to_vec(&items)?).context("save RACE cache")?;
+    Ok(items)
 }
 
 impl Benchmark for RaceBenchmark {
@@ -114,7 +112,7 @@ impl Benchmark for RaceBenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let items = load_race_dataset();
+        let items = load_race_dataset()?;
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;

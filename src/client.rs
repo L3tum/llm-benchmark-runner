@@ -386,3 +386,111 @@ impl Client {
         self.history.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg() -> Message {
+        Message {
+            content: None,
+            thinking_content: None,
+            thinking: None,
+            tool_calls: None,
+        }
+    }
+
+    fn usage(
+        completion_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        thinking_tokens: Option<u64>,
+        completion_details: Option<TokenDetails>,
+        output_details: Option<TokenDetails>,
+    ) -> Usage {
+        Usage {
+            completion_tokens,
+            output_tokens,
+            thinking_tokens,
+            completion_tokens_details: completion_details,
+            output_tokens_details: output_details,
+        }
+    }
+
+    fn resp(u: Option<Usage>) -> ChatResponse {
+        ChatResponse {
+            choices: Vec::new(),
+            usage: u,
+        }
+    }
+
+    #[test]
+    fn token_usage_from_completion_tokens() {
+        let r = resp(Some(usage(Some(5), None, None, None, None)));
+        let (out, think) = token_usage_from_response(&r, &msg());
+        assert_eq!(out, Some(5));
+        assert_eq!(think, None);
+    }
+
+    #[test]
+    fn token_usage_from_output_tokens_fallback() {
+        // completion_tokens takes priority, output_tokens is the fallback.
+        let r = resp(Some(usage(None, Some(7), None, None, None)));
+        let (out, _) = token_usage_from_response(&r, &msg());
+        assert_eq!(out, Some(7));
+    }
+
+    #[test]
+    fn token_usage_direct_thinking_tokens() {
+        let r = resp(Some(usage(Some(1), None, Some(3), None, None)));
+        let (_, think) = token_usage_from_response(&r, &msg());
+        assert_eq!(think, Some(3));
+    }
+
+    #[test]
+    fn token_usage_thinking_from_completion_details() {
+        let details = TokenDetails {
+            reasoning_tokens: Some(9),
+            thinking_tokens: None,
+        };
+        let r = resp(Some(usage(Some(2), None, None, Some(details), None)));
+        let (_, think) = token_usage_from_response(&r, &msg());
+        assert_eq!(think, Some(9));
+    }
+
+    #[test]
+    fn token_usage_thinking_from_output_details() {
+        let details = TokenDetails {
+            reasoning_tokens: None,
+            thinking_tokens: Some(12),
+        };
+        let r = resp(Some(usage(None, None, None, None, Some(details))));
+        let (_, think) = token_usage_from_response(&r, &msg());
+        assert_eq!(think, Some(12));
+    }
+
+    #[test]
+    fn token_usage_thinking_from_message_content_fallback() {
+        let r = resp(Some(usage(None, Some(4), None, None, None)));
+        let mut m = msg();
+        m.thinking_content = Some("one two three".to_string()); // 3 words
+        let (_, think) = token_usage_from_response(&r, &m);
+        assert_eq!(think, Some(3));
+    }
+
+    #[test]
+    fn token_usage_thinking_from_message_json_fallback() {
+        let r = resp(Some(usage(None, Some(4), None, None, None)));
+        let mut m = msg();
+        m.thinking = Some(serde_json::json!("a b")); // 2 words when stringified
+        let (_, think) = token_usage_from_response(&r, &m);
+        assert_eq!(think, Some(2));
+    }
+
+    #[test]
+    fn token_usage_all_none() {
+        let r = resp(None);
+        let (out, think) = token_usage_from_response(&r, &msg());
+        assert_eq!(out, None);
+        assert_eq!(think, None);
+    }
+}

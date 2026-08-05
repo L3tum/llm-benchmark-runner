@@ -2,10 +2,10 @@ use crate::benchmarks::Benchmark;
 use crate::token_tracker::TokenTracker;
 
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -30,7 +30,7 @@ impl Default for MmluProPlusBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // id and category kept for schema alignment
 struct MmluProPlusItem {
     id: String,
@@ -46,7 +46,9 @@ fn load_mmlu_pro_plus() -> Vec<MmluProPlusItem> {
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("mmlu_pro_plus");
-    let path = cache_dir.join("test.csv");
+    let path = cache_dir.join("test.json");
+    let url =
+        "https://huggingface.co/datasets/saeidasgari/mmlu-pro-plus/resolve/main/data/test-00000-of-00001.parquet";
 
     if path.exists() {
         let content = fs::read_to_string(&path).expect("Failed to read cached MMLU-Pro+");
@@ -55,43 +57,53 @@ fn load_mmlu_pro_plus() -> Vec<MmluProPlusItem> {
 
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
     println!("  Downloading MMLU-Pro+ dataset...");
-    let url = "https://huggingface.co/datasets/li-lab/MMLU-Pro+/resolve/main/test.csv";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
         .expect("Failed to download MMLU-Pro+");
-
-    // Parse CSV using csv crate for proper quoted field handling
-    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(b',')
-        .has_headers(true)
-        .from_reader(content.as_bytes());
-    let mut items = Vec::new();
-    for record in reader.records().flatten() {
-        let id = record.get(0).unwrap_or("").to_string();
-        let category = record.get(1).unwrap_or("").to_string();
-        let question = record.get(2).unwrap_or("").to_string();
-        // Choices are 10 strings
-        let choices: Vec<String> = (3..13)
-            .filter_map(|i| record.get(i))
-            .map(|s| s.to_string())
-            .collect();
-        // Correct mask is 10 booleans
-        let correct_mask: Vec<bool> = (13..23)
-            .filter_map(|i| record.get(i))
-            .map(|s| s == "true")
-            .collect();
-        let subject = record.get(23).unwrap_or("").to_string();
-        items.push(MmluProPlusItem {
-            id,
-            category,
-            question,
-            choices,
-            choices_correct_mask: correct_mask,
-            subject,
-        });
-    }
-
-    fs::write(&path, &bytes).expect("Failed to save MMLU-Pro+");
+    let items: Vec<MmluProPlusItem> = rows
+        .iter()
+        .map(|r| {
+            let choices: Vec<String> = r
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let answer_index =
+                r.get("answer_index").and_then(|v| v.as_i64()).unwrap_or(-1) as usize;
+            let mask = (0..choices.len()).map(|i| i == answer_index).collect();
+            MmluProPlusItem {
+                id: r
+                    .get("question_id")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                category: r
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                question: r
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                choices,
+                choices_correct_mask: mask,
+                subject: r
+                    .get("src")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        })
+        .collect();
+    fs::write(
+        &path,
+        serde_json::to_vec(&items).expect("Failed to save MMLU-Pro+"),
+    )
+    .expect("Failed to save MMLU-Pro+");
     items
 }
 

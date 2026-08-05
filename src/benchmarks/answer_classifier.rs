@@ -136,8 +136,10 @@ fn detect_truncated(text: &str) -> bool {
             return true;
         }
     }
-    // Check if it ends with an opening parenthesis, quote, or bracket
-    if trimmed.ends_with('(') || trimmed.ends_with('[') || trimmed.ends_with('"') {
+    // Check if it ends with an opening bracket (a strong truncation signal).
+    // The closing-quote check is deliberately omitted: models frequently wrap
+    // complete answers in quotes, so ending on '"' is not evidence of truncation.
+    if trimmed.ends_with('(') || trimmed.ends_with('[') {
         return true;
     }
     false
@@ -442,6 +444,20 @@ mod tests {
             classify_wrong_answer(
                 "I believe it is A because it is a great answer and ",
                 "Which option?",
+                'B',
+                None
+            ),
+            WrongAnswerClass::Truncated
+        );
+    }
+
+    #[test]
+    fn test_quoted_answer_not_truncated() {
+        // A complete answer wrapped in quotes must not be flagged as Truncated.
+        assert_ne!(
+            classify_wrong_answer(
+                "\"The answer is A. This is a complete response.\"",
+                "What is 2+2?",
                 'B',
                 None
             ),

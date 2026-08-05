@@ -4,7 +4,7 @@ use crate::download::download_with_retry_bytes;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for FeverBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeverItem {
     claim: String,
     label: String, // "SUPPORTS", "REFUTES", "NOT ENOUGH INFO"
@@ -41,6 +41,7 @@ fn load_fever_dataset() -> Vec<FeverItem> {
         .join("llm-benchmark-runner")
         .join("fever");
     let path = cache_dir.join("fever_dev.json");
+    let url = "https://fever.ai/download/fever/shared_task_dev.jsonl";
 
     if path.exists() {
         let content = fs::read_to_string(&path).expect("Failed to read cached FEVER");
@@ -49,62 +50,30 @@ fn load_fever_dataset() -> Vec<FeverItem> {
 
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
     println!("  Downloading FEVER dev dataset...");
+    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+        .expect("Failed to download FEVER");
 
-    // Try multiple sources
-    let urls = [
-        "https://fever.ai/data/fever_dev.json",
-        "https://huggingface.co/datasets/fever/fever/resolve/main/data/paper_dev.json",
-        "https://raw.githubusercontent.com/awslabs/fever/main/data/fever_dev.json",
-    ];
-
-    let mut last_err = None;
-    for url in &urls {
-        match download_with_retry_bytes(url, 2, 30, "llm-benchmark-runner") {
-            Ok(bytes) => match serde_json::from_slice::<Vec<FeverItem>>(&bytes) {
-                Ok(items) => {
-                    fs::write(&path, bytes).expect("Failed to save FEVER");
-                    return items;
-                }
-                Err(_) => {
-                    if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                        if let Some(dev) = parsed.get("dev") {
-                            if let Some(claims) = dev.get("claims").and_then(|c| c.as_array()) {
-                                let mut items = Vec::new();
-                                for claim_obj in claims {
-                                    items.push(FeverItem {
-                                        claim: claim_obj
-                                            .get("claim")
-                                            .and_then(|c| c.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        label: claim_obj
-                                            .get("label")
-                                            .and_then(|l| l.as_str())
-                                            .unwrap_or("NOT ENOUGH INFO")
-                                            .to_string(),
-                                    });
-                                }
-                                fs::write(&path, bytes).expect("Failed to save FEVER");
-                                return items;
-                            }
-                        }
-                    }
-                    eprintln!("  Failed to parse FEVER from {}", url);
-                }
-            },
-            Err(e) => {
-                last_err = Some(anyhow::anyhow!("Failed to download from {}: {}", url, e));
-            }
-        }
-    }
-
-    let err = last_err.unwrap_or(anyhow::anyhow!("No download sources available"));
-    eprintln!("  Error: {}", err);
-    eprintln!(
-        "  Please manually download the FEVER dataset from https://fever.ai and place it at:"
-    );
-    eprintln!("  {}", path.display());
-    std::process::exit(1);
+    // shared_task_dev.jsonl: one claim per line {claim, verdict, evidence, id}.
+    let content = String::from_utf8(bytes.to_vec()).expect("Failed to decode UTF-8");
+    let items: Vec<FeverItem> = content
+        .lines()
+        .filter_map(|line| -> Option<FeverItem> {
+            let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+            let claim = v.get("claim")?.as_str()?.to_string();
+            let label = v
+                .get("verdict")
+                .and_then(|l| l.as_str())
+                .unwrap_or("NOT ENOUGH INFO")
+                .to_string();
+            Some(FeverItem { claim, label })
+        })
+        .collect();
+    fs::write(
+        &path,
+        serde_json::to_vec(&items).expect("Failed to save FEVER"),
+    )
+    .expect("Failed to save FEVER");
+    items
 }
 
 impl Benchmark for FeverBenchmark {

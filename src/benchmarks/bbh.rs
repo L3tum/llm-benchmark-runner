@@ -1,6 +1,6 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::reports::model::{BreakdownTable, Diagnostic};
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
@@ -157,53 +157,50 @@ fn load_bbh_tasks(selected_tasks: &[&str]) -> Vec<BbhTask> {
     for task_name in selected_tasks {
         let task_file = cache_dir.join(format!("{}.json", task_name));
 
-        if task_file.exists() {
+        let instances: Vec<BbhInstance> = if task_file.exists() {
             let content = fs::read_to_string(&task_file).expect("Failed to read cached BBH task");
-            let task_data: BbhTaskData =
-                serde_json::from_str(&content).expect("Failed to parse BBH task");
-            all_tasks.extend(instances_to_tasks(task_data.instances, task_name));
-            continue;
-        }
-
-        // Download from HF
-        let url = format!(
-            "https://huggingface.co/datasets/lukaemon/bbh/resolve/main/{}/{}.json",
-            task_name, task_name
-        );
-        match download_with_retry_bytes(&url, 2, 120, "llm-benchmark-runner") {
-            Ok(bytes) => {
-                fs::write(&task_file, &bytes).expect("Failed to save BBH task");
-                let task_data: BbhTaskData =
-                    serde_json::from_slice(&bytes).expect("Failed to parse BBH task");
-                all_tasks.extend(instances_to_tasks(task_data.instances, task_name));
-            }
-            Err(e) => {
-                eprintln!("  Failed to download BBH task {}: {}", task_name, e);
-                // Try alternate URL format
-                let url2 = format!(
-                    "https://huggingface.co/datasets/lukaemon/bbh/resolve/main/{}.json",
-                    task_name
-                );
-                if let Ok(bytes) = download_with_retry_bytes(&url2, 2, 120, "llm-benchmark-runner")
-                {
-                    fs::write(&task_file, &bytes).expect("Failed to save BBH task");
-                    let task_data: BbhTaskData =
-                        serde_json::from_slice(&bytes).expect("Failed to parse BBH task");
-                    all_tasks.extend(instances_to_tasks(task_data.instances, task_name));
-                }
-            }
-        }
+            serde_json::from_str(&content).expect("Failed to parse BBH task")
+        } else {
+            // BBH on HuggingFace is hosted as per-task parquet shards.
+            let url = format!(
+                "https://huggingface.co/datasets/lukaemon/bbh/resolve/main/{}/test-00000-of-00001.parquet",
+                task_name
+            );
+            let rows = download_parquet_records(&url, 2, 120, "llm-benchmark-runner")
+                .unwrap_or_else(|e| {
+                    eprintln!("  Failed to download BBH task {}: {}", task_name, e);
+                    Vec::new()
+                });
+            let inst: Vec<BbhInstance> = rows
+                .iter()
+                .map(|r| BbhInstance {
+                    input: r
+                        .get("input")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    target: r
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    few_shot_examples: None,
+                })
+                .collect();
+            fs::write(
+                &task_file,
+                serde_json::to_vec(&inst).expect("Failed to save BBH task"),
+            )
+            .expect("Failed to save BBH task");
+            inst
+        };
+        all_tasks.extend(instances_to_tasks(instances, task_name));
     }
 
     all_tasks
 }
 
-#[derive(Debug, Deserialize)]
-struct BbhTaskData {
-    instances: Vec<BbhInstance>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BbhInstance {
     input: String,
     target: String,
@@ -211,7 +208,7 @@ struct BbhInstance {
     few_shot_examples: Option<Vec<BbhRawExample>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BbhRawExample {
     input: String,
     target: String,

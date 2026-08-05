@@ -15,8 +15,13 @@ pub fn get_category_order() -> &'static Vec<BenchmarkCategory> {
             BenchmarkCategory::Reasoning,
             BenchmarkCategory::Research,
             BenchmarkCategory::Similarity,
+            BenchmarkCategory::InstructionFollowing,
             BenchmarkCategory::Hallucination,
             BenchmarkCategory::Translation,
+            BenchmarkCategory::Safety,
+            BenchmarkCategory::Security,
+            BenchmarkCategory::ToolUse,
+            BenchmarkCategory::StringManipulation,
         ]
     })
 }

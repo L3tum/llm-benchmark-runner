@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -34,7 +34,7 @@ impl Default for CnnDailyMailBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // id field not read but kept for schema alignment
 struct CnnDmItem {
     id: String,
@@ -48,6 +48,8 @@ fn load_cnn_dailymail() -> Vec<CnnDmItem> {
         .join("llm-benchmark-runner")
         .join("cnn_dailymail");
     let path = cache_dir.join("cnn_dailymail.json");
+    let url =
+        "https://huggingface.co/datasets/abisee/cnn_dailymail/resolve/main/3.0.0/test-00000-of-00001.parquet";
 
     if path.exists() {
         let content = fs::read_to_string(&path).expect("Failed to read cached CNN/DM");
@@ -56,28 +58,33 @@ fn load_cnn_dailymail() -> Vec<CnnDmItem> {
 
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
     println!("  Downloading CNN/Daily Mail dataset...");
-    let url = "https://huggingface.co/datasets/EdinburghNLP/cnn_dailymail/resolve/main/test.csv";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
         .expect("Failed to download CNN/DM");
-
-    // Parse CSV (3 columns: id, article, highlights)
-    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
-    let mut items = Vec::new();
-    for line in content.lines().skip(1) {
-        if line.is_empty() {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(",").collect();
-        if fields.len() >= 3 {
-            items.push(CnnDmItem {
-                id: fields[0].trim_matches('"').to_string(),
-                article: fields[1].trim_matches('"').to_string(),
-                highlights: fields[2].trim_matches('"').to_string(),
-            });
-        }
-    }
-
-    fs::write(&path, &bytes).expect("Failed to save CNN/DM");
+    let items: Vec<CnnDmItem> = rows
+        .iter()
+        .map(|r| CnnDmItem {
+            id: r
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            article: r
+                .get("article")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            highlights: r
+                .get("highlights")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .collect();
+    fs::write(
+        &path,
+        serde_json::to_vec(&items).expect("Failed to save CNN/DM"),
+    )
+    .expect("Failed to save CNN/DM");
     items
 }
 

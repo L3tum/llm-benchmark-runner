@@ -3,6 +3,7 @@ use crate::config;
 use crate::config::Model;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
+use crate::utils::extract_task_stats;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -142,23 +143,6 @@ fn load_config(state: &mut HexState, config: &yaml_serde::Value) {
         }
     }
     state.current_idx = 0;
-}
-
-fn extract_task_stats(raw: &serde_json::Value) -> (i64, i64, i64, i64) {
-    let total = raw.get("total_tasks").and_then(|v| v.as_i64()).unwrap_or(0);
-    let correct = raw
-        .get("passed_tasks")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let output_tokens = raw
-        .get("output_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let thinking_tokens = raw
-        .get("thinking_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    (total, correct, output_tokens, thinking_tokens)
 }
 
 impl Benchmark for HexBenchmark {

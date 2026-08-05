@@ -269,42 +269,17 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             eta_str
         );
 
-        let status = if model_result.is_empty() {
-            "error"
-        } else {
-            "completed"
-        };
-        let mut model_data = serde_json::Map::new();
-        model_data.insert("status".to_string(), serde_json::json!(status));
-        model_data.insert(
-            "benchmarks_completed".to_string(),
-            serde_json::json!(new_successful.clone()),
-        );
-        model_data.insert(
-            "benchmarks_failed".to_string(),
-            serde_json::json!(new_failed.clone()),
-        );
-        // Serialize each benchmark result to JSON and add to the model data
-        let mut bench_results = serde_json::Map::new();
-        for (bench_name, result) in &model_result {
-            bench_results.insert(
-                bench_name.clone(),
-                serde_json::to_value(result).unwrap_or(serde_json::json!(null)),
-            );
-        }
-        model_data.insert(
-            "benchmarks".to_string(),
-            serde_json::Value::Object(bench_results),
-        );
-
         // Update in-memory results
         all_models_results.insert(model.display_name.clone(), model_result);
 
+        // Track per-model completed/failed so each model keeps its own lists.
+        completed_benchmarks_per_model.insert(model.display_name.clone(), new_successful.clone());
+        failed_benchmarks_per_model.insert(model.display_name.clone(), new_failed.clone());
+
         save_results(
             &all_models_results,
-            &model_data,
-            &new_successful,
-            &new_failed,
+            &completed_benchmarks_per_model,
+            &failed_benchmarks_per_model,
             RESULTS_FILE,
         )?;
     }
@@ -531,12 +506,12 @@ fn load_existing_results(path: &str) -> Result<Option<serde_json::Value>> {
 
 fn save_results(
     all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
-    _model_data: &serde_json::Map<String, serde_json::Value>,
-    new_successful: &Vec<String>,
-    new_failed: &Vec<String>,
+    completed_per_model: &HashMap<String, Vec<String>>,
+    failed_per_model: &HashMap<String, Vec<String>>,
     path: &str,
 ) -> Result<()> {
-    // Convert all_models_results to serde_json::Value
+    // Convert all_models_results to serde_json::Value, attaching each model's
+    // OWN completed/failed lists (not the most recently processed model's).
     let models_json: serde_json::Map<String, serde_json::Value> = all_models_results
         .iter()
         .map(|(model_name, bench_results)| {
@@ -551,8 +526,14 @@ fn save_results(
                 .collect();
             let model_value = serde_json::json!({
                 "benchmarks": bench_values,
-                "new_successful": new_successful,
-                "new_failed": new_failed,
+                "benchmarks_completed": completed_per_model
+                    .get(model_name)
+                    .cloned()
+                    .unwrap_or_default(),
+                "benchmarks_failed": failed_per_model
+                    .get(model_name)
+                    .cloned()
+                    .unwrap_or_default(),
             });
             (model_name.clone(), model_value)
         })

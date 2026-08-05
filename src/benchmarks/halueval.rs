@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for HaluEvalBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct HaluEvalItem {
     question: String,
     context: String,
@@ -43,6 +43,8 @@ fn load_halueval_dataset() -> Vec<HaluEvalItem> {
         .join("llm-benchmark-runner")
         .join("halueval");
     let path = cache_dir.join("qa.json");
+    let url =
+        "https://huggingface.co/datasets/jzjiao/halueval-sft/resolve/main/data/test-00000-of-00001-af0f10a1c83a1f93.parquet";
 
     if path.exists() {
         let content = fs::read_to_string(&path).expect("Failed to read cached HaluEval");
@@ -50,14 +52,41 @@ fn load_halueval_dataset() -> Vec<HaluEvalItem> {
     }
 
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-    println!("  Downloading HaluEval dataset (requires HF_TOKEN)...");
-    let url = "https://huggingface.co/datasets/marsha1908/HaluEval/resolve/main/qa.json";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+    println!("  Downloading HaluEval (SFT test split) dataset...");
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
         .expect("Failed to download HaluEval");
-
-    let items: Vec<HaluEvalItem> =
-        serde_json::from_slice(&bytes).expect("Failed to parse HaluEval");
-    fs::write(&path, bytes).expect("Failed to save HaluEval");
+    let mut items = Vec::new();
+    for r in rows {
+        let input = r
+            .get("input")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let label_raw = r
+            .get("ground_truth_output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if input.trim().is_empty() {
+            continue;
+        }
+        let label = if label_raw.contains("inconsistent") {
+            "hallucinated"
+        } else {
+            "not_hallucinated"
+        };
+        items.push(HaluEvalItem {
+            question: String::new(),
+            context: input,
+            answer: String::new(),
+            label: label.to_string(),
+        });
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec(&items).expect("Failed to save HaluEval"),
+    )
+    .expect("Failed to save HaluEval");
     items
 }
 

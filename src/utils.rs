@@ -1,5 +1,24 @@
 use std::time::Duration;
 
+/// Extract common task stats from a raw benchmark result JSON value.
+/// Returns `(total, correct, output_tokens, thinking_tokens)`.
+pub fn extract_task_stats(raw: &serde_json::Value) -> (i64, i64, i64, i64) {
+    let total = raw.get("total_tasks").and_then(|v| v.as_i64()).unwrap_or(0);
+    let correct = raw
+        .get("passed_tasks")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let output_tokens = raw
+        .get("output_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let thinking_tokens = raw
+        .get("thinking_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    (total, correct, output_tokens, thinking_tokens)
+}
+
 /// Format a Duration as "H:MM:SS" or "MM:SS"
 pub fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();

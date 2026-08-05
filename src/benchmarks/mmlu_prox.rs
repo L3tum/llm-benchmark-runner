@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
-use anyhow::Result;
-use serde::Deserialize;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for MmluProxBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // subject field kept for schema alignment
 struct MmluProXItem {
     id: String,
@@ -41,33 +41,85 @@ struct MmluProXItem {
     subject: String,
 }
 
-fn load_mmlu_prox() -> Vec<MmluProXItem> {
+const ALL_LANGUAGES: &[&str] = &[
+    "af", "ar", "bn", "cs", "de", "en", "es", "fr", "hi", "hu", "id", "it", "ja", "ko", "mr", "ne",
+    "pt", "ru", "sr", "sw", "te", "th", "uk", "ur", "vi", "wo", "yo", "zh", "zu",
+];
+
+fn load_language(cache_dir: &std::path::Path, lang: &str) -> Result<Vec<MmluProXItem>> {
+    let path = cache_dir.join(format!("{}.json", lang));
+    if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        return serde_json::from_str(&content).context("parse cached MMLU-ProX");
+    }
+    let url = format!(
+        "https://huggingface.co/datasets/li-lab/MMLU-ProX/resolve/main/{}/test-00000-of-00001.parquet",
+        lang
+    );
+    println!("  Downloading MMLU-ProX language '{}'...", lang);
+    let rows = download_parquet_records(&url, 3, 60, "llm-benchmark-runner")
+        .with_context(|| format!("download MMLU-ProX {} parquet", lang))?;
+    let items: Vec<MmluProXItem> = rows
+        .iter()
+        .map(|r| {
+            let mut choices = Vec::new();
+            for i in 0..10 {
+                if let Some(v) = r.get(format!("option_{}", i)).and_then(|v| v.as_str()) {
+                    choices.push(v.to_string());
+                }
+            }
+            MmluProXItem {
+                id: r
+                    .get("question_id")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                language: lang.to_string(),
+                category: r
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                question: r
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                choices,
+                correct_answer: r
+                    .get("answer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                subject: r
+                    .get("src")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        })
+        .collect();
+    fs::write(&path, serde_json::to_vec(&items)?).context("save MMLU-ProX cache")?;
+    Ok(items)
+}
+
+fn load_mmlu_prox(languages: &[String]) -> Result<Vec<MmluProXItem>> {
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("mmlu_prox");
-    let path = cache_dir.join("MMLU-ProX.json");
-
-    if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached MMLU-ProX");
-        return serde_json::from_str(&content).expect("Failed to parse MMLU-ProX");
+    fs::create_dir_all(&cache_dir)?;
+    let mut all = Vec::new();
+    for lang in languages {
+        let lang = lang.trim().to_lowercase();
+        if lang.is_empty() {
+            continue;
+        }
+        match load_language(&cache_dir, &lang) {
+            Ok(items) => all.extend(items),
+            Err(e) => eprintln!("  WARNING: skipping MMLU-ProX language '{}': {}", lang, e),
+        }
     }
-
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-    println!("  Downloading MMLU-ProX multilingual dataset...");
-    let url = "https://huggingface.co/datasets/li-lab/MMLU-ProX/resolve/main/MMLU-ProX.json";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-        .expect("Failed to download MMLU-ProX");
-
-    let dataset: MmluProXDataset = serde_json::from_slice(&bytes).unwrap();
-    let items = dataset.data;
-    fs::write(&path, &bytes).expect("Failed to save MMLU-ProX");
-    items
-}
-
-#[derive(Debug, Deserialize)]
-struct MmluProXDataset {
-    data: Vec<MmluProXItem>,
+    Ok(all)
 }
 
 impl Benchmark for MmluProxBenchmark {
@@ -83,8 +135,17 @@ impl Benchmark for MmluProxBenchmark {
         BenchmarkCategory::Knowledge
     }
 
-    fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let items = load_mmlu_prox();
+    fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
+        let languages: Vec<String> = crate::config::extract_string_vec(config, "languages")
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| ALL_LANGUAGES.iter().map(|s| s.to_string()).collect());
+        let items = load_mmlu_prox(&languages)?;
+        println!(
+            "MMLU-ProX: {} questions across {} language(s): {}",
+            items.len(),
+            languages.len(),
+            languages.join(", ")
+        );
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;

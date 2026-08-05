@@ -4,6 +4,7 @@ use crate::config::Model;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -449,38 +450,39 @@ impl GpqaBenchmark {
     }
 }
 
+static RE_ANSWER_IS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\banswer is\s*\(?([A-D])\)?").unwrap());
+static RE_ANSWER_COLON: Lazy<Regex> = Lazy::new(|| Regex::new(r"[aA]nswer:\s*([A-D])").unwrap());
+static RE_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-D])\b").unwrap());
+static RE_SEQUENCE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b[A-D]\b\s*[,;]\s*\b[A-D]\b").unwrap());
+
 fn extract_answer(text: &str) -> Option<char> {
     // Scan entire text for answer patterns, use the last match
-    let re1 = Regex::new(r"\banswer is\s*\(?([A-D])\)?").ok()?;
-    let last = re1.captures_iter(text).last();
+    let last = RE_ANSWER_IS.captures_iter(text).last();
     if let Some(caps) = last {
         if let Some(m) = caps.get(1) {
             return m.as_str().chars().next();
         }
     }
 
-    let re2 = Regex::new(r"[aA]nswer:\s*([A-D])").ok()?;
-    let last = re2.captures_iter(text).last();
+    let last = RE_ANSWER_COLON.captures_iter(text).last();
     if let Some(caps) = last {
         if let Some(m) = caps.get(1) {
             return m.as_str().chars().next();
         }
     }
 
-    // Final fallback: find the last single letter from A-D that isn't part of a sequence like "A, B" or "A; B"
-    let re_letter = Regex::new(r"\b([A-D])\b").ok()?;
-    // Find all A-D sequence patterns (case-insensitive, with commas/semicolons)
-    let re_sequence = Regex::new(r"\b[A-D]\b\s*[,;]\s*\b[A-D]\b")
-        .ok()?
+    // Final fallback: find the last single letter from A-D that isn't part of a sequence.
+    let re_sequence = RE_SEQUENCE
         .find_iter(text)
         .map(|m| (m.start(), m.end()))
         .collect::<Vec<_>>();
 
     let mut last_letter = None;
-    for caps in re_letter.captures_iter(text) {
+    for caps in RE_LETTER.captures_iter(text) {
         if let Some(letter_match) = caps.get(1) {
             let start = letter_match.start();
-            // Check if this letter position falls within any sequence range
             let in_sequence = re_sequence.iter().any(|(s, e)| start >= *s && start < *e);
             if !in_sequence {
                 last_letter = letter_match.as_str().chars().next();

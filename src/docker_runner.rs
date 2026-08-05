@@ -222,9 +222,9 @@ impl DockerRunner {
     /// Execute a trusted command in a running container and return stdout.
     ///
     /// # Security
-    /// The `command` is passed to `sh -c`. Only call with sanitized, validated
-    /// input. Never pass unsanitized user or LLM data directly. The caller
-    /// must enforce length limits (max 4 KB) and input validation.
+    /// The `command` is passed to `sh -c`. Commands containing the string
+    /// "docker" are rejected to prevent Docker-in-Docker / container-escape
+    /// attempts. The caller must also enforce length limits (max 4 KB).
     pub fn exec(container: &str, command: &str) -> Result<String> {
         const MAX_CMD_LEN: usize = 4 * 1024;
         if command.len() > MAX_CMD_LEN {
@@ -234,6 +234,15 @@ impl DockerRunner {
                 MAX_CMD_LEN
             ));
         }
+
+        // SECURITY: Denylist check — block Docker-in-Docker / escape attempts.
+        // A sandboxed container should never need to invoke "docker".
+        if command.to_lowercase().contains("docker") {
+            return Err(anyhow::anyhow!(
+                "Command rejected: 'docker' is not allowed in sandboxed commands"
+            ));
+        }
+
         let output = Command::new("docker")
             .arg("exec")
             .arg(container)
@@ -399,5 +408,88 @@ pub fn docker_mount_source(path: &Path, host_repo_path: Option<&Path>) -> Result
         Ok(host_repo_path.join(relative))
     } else {
         Ok(canonical)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // --- P0-2: shell denylist on DockerRunner::exec ---
+
+    #[test]
+    fn exec_blocks_docker_command() {
+        let result = DockerRunner::exec("test-container", "docker ps");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("docker"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn exec_blocks_docker_case_insensitive() {
+        let result = DockerRunner::exec("test-container", "DOCKER info");
+        assert!(
+            result.is_err(),
+            "case-insensitive 'docker' should be blocked"
+        );
+    }
+
+    #[test]
+    fn exec_blocks_docker_in_subcommand() {
+        let result = DockerRunner::exec("test-container", "bash -c 'docker images'");
+        assert!(
+            result.is_err(),
+            "'docker' nested in a subcommand should be blocked"
+        );
+    }
+
+    #[test]
+    fn exec_allows_safe_command() {
+        // A safe command may succeed (if Docker is present) or fail for other
+        // reasons, but it must never be rejected by the denylist itself.
+        let result = DockerRunner::exec("test-container", "echo hello");
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("Command rejected: 'docker'"),
+                "safe command should not be blocked by denylist: {}",
+                msg
+            );
+        }
+    }
+
+    // --- P2-4: pure helper tests (no live Docker required) ---
+
+    #[test]
+    fn sanitize_name_replaces_illegal_chars() {
+        assert_eq!(sanitize_name("my bench/name:1"), "my-bench-name-1");
+    }
+
+    #[test]
+    fn sanitize_name_keeps_alnum_dash_underscore_dot() {
+        assert_eq!(sanitize_name("aB-9_x.y"), "aB-9_x.y");
+    }
+
+    #[test]
+    fn container_name_contains_prefix() {
+        let name = docker_container_name("swe-bench");
+        assert!(name.starts_with("swe-bench-"), "unexpected name: {}", name);
+    }
+
+    #[test]
+    fn mount_source_without_host_repo_returns_canonical() {
+        let p = Path::new(".").canonicalize().unwrap();
+        let out = docker_mount_source(Path::new("."), None).unwrap();
+        assert_eq!(out, p);
+    }
+
+    #[test]
+    fn mount_source_outside_repo_errors_with_host_repo_path() {
+        // A temp dir lives outside the crate root, so with host_repo_path set the
+        // source cannot be remapped and must error rather than silently mount.
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = tmp.path().canonicalize().unwrap();
+        let res = docker_mount_source(&abs, Some(Path::new("/host/repo")));
+        assert!(res.is_err(), "expected error for out-of-repo mount source");
     }
 }

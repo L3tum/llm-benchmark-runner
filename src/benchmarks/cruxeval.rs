@@ -54,17 +54,13 @@ struct CruxEvalItem {
     task_type: Option<String>,
 }
 
-fn load_cruxeval_dataset(subset: CruxEvalSubset, max_items: usize) -> Result<Vec<CruxEvalItem>> {
+fn load_cruxeval_dataset(_subset: CruxEvalSubset, max_items: usize) -> Result<Vec<CruxEvalItem>> {
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("cruxeval");
-    let subset_name = match subset {
-        CruxEvalSubset::Input => "input",
-        CruxEvalSubset::Output => "output",
-        CruxEvalSubset::Repair => "repair",
-    };
-    let path = cache_dir.join(format!("cruxeval_{}.jsonl", subset_name));
+    let path = cache_dir.join("cruxeval.jsonl");
+    let url = "https://huggingface.co/datasets/cruxeval-org/cruxeval/resolve/main/test.jsonl";
 
     if path.exists() {
         let content =
@@ -78,56 +74,47 @@ fn load_cruxeval_dataset(subset: CruxEvalSubset, max_items: usize) -> Result<Vec
 
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
     println!(
-        "  Downloading CRUXEval {} subset (up to {} instances)...",
-        subset_name, max_items
+        "  Downloading CRUXEval test set (up to {} instances)...",
+        max_items
     );
 
-    // CRUXEval on HuggingFace
-    let url = format!(
-        "https://huggingface.co/datasets/facebook/CRUXEval/resolve/main/cruxeval_{}/test.jsonl",
-        subset_name
-    );
-    match download_with_retry_bytes(&url, 3, 120, "llm-benchmark-runner") {
-        Ok(bytes) => {
-            let content = String::from_utf8(bytes.to_vec()).expect("Failed to decode UTF-8");
-            let items: Vec<CruxEvalItem> = content
-                .lines()
-                .filter_map(|line| serde_json::from_str(line).ok())
-                .take(max_items)
-                .collect();
-            fs::write(&path, &bytes).expect("Failed to save CRUXEval");
-            return Ok(items);
-        }
-        Err(e) => {
-            eprintln!("  Failed to download CRUXEval {}: {}", subset_name, e);
-        }
-    }
-
-    // Try alternate URL format
-    let url2 = format!(
-        "https://huggingface.co/datasets/facebookresearch/CRUXEval/resolve/main/cruxeval_{}/test.jsonl",
-        subset_name
-    );
-    match download_with_retry_bytes(&url2, 2, 120, "llm-benchmark-runner") {
-        Ok(bytes) => {
-            let content = String::from_utf8(bytes.to_vec()).expect("Failed to decode UTF-8");
-            let items: Vec<CruxEvalItem> = content
-                .lines()
-                .filter_map(|line| serde_json::from_str(line).ok())
-                .take(max_items)
-                .collect();
-            fs::write(&path, &bytes).expect("Failed to save CRUXEval");
-            return Ok(items);
-        }
-        Err(e) => {
-            eprintln!("  Failed to download CRUXEval from fallback: {}", e);
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "Could not download CRUXEval dataset. Please manually download and place at: {}",
-        path.display()
-    ))
+    // cruxeval-org/cruxeval ships a single test.jsonl with code/input/output/id.
+    let bytes = download_with_retry_bytes(url, 3, 120, "llm-benchmark-runner")?;
+    let content = String::from_utf8(bytes.to_vec()).expect("Failed to decode UTF-8");
+    let items: Vec<CruxEvalItem> = content
+        .lines()
+        .filter_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .map(|v| CruxEvalItem {
+                    task_id: v
+                        .get("id")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    code: v
+                        .get("code")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    input: v
+                        .get("input")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    output: v
+                        .get("output")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    buggy_code: None,
+                    task_type: None,
+                })
+        })
+        .take(max_items)
+        .collect();
+    fs::write(&path, &content).expect("Failed to save CRUXEval");
+    Ok(items)
 }
 
 /// Python normalization script for CRUXEval evaluation (executed in Docker).

@@ -4,6 +4,7 @@ use crate::download::download_with_retry_bytes;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::fs;
@@ -260,13 +261,14 @@ impl AimeBenchmark {
     }
 }
 
+static RE_BOXED: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\boxed\{(\d+)\}").unwrap());
+
 /// Extract a 3-digit integer answer from a model response using regex.
 /// Looks for patterns like "\boxed{000}" or "\boxed{123}".
 fn extract_int_answer(text: &str) -> Option<String> {
-    let re = Regex::new(r"\\boxed\{(\d+)\}")
-        .ok()
-        .and_then(|r| r.captures_iter(text).last())
+    RE_BOXED
+        .captures_iter(text)
+        .last()
         .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().to_string());
-    re
+        .map(|m| m.as_str().to_string())
 }

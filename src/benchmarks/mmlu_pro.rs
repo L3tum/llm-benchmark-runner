@@ -1,9 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -41,23 +42,55 @@ impl Default for MmluProBenchmark {
 }
 
 impl MmluProBenchmark {
-    pub fn download_dataset(&self, split: &str) -> Result<PathBuf> {
+    pub fn download_dataset(&self, _split: &str) -> Result<PathBuf> {
         let cache_dir = dirs::cache_dir()
             .unwrap_or_default()
             .join("llm-benchmark-runner")
             .join("mmlu_pro");
         fs::create_dir_all(&cache_dir)?;
-        let path = cache_dir.join(format!("{}.json", split));
+        let path = cache_dir.join("test.json");
         if path.exists() {
             return Ok(path);
         }
-        let url = format!(
-            "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro/resolve/main/{}/{}.json",
-            split, split
-        );
-        println!("  Downloading MMLU-Pro {} data...", split);
-        let bytes = download_with_retry_bytes(&url, 3, 120, "llm-benchmark-runner")?;
-        fs::write(&path, bytes)?;
+        // MMLU-Pro is now hosted as a single consolidated test parquet with a
+        // per-item `category` column.
+        let url = "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro/resolve/main/data/test-00000-of-00001.parquet";
+        println!("  Downloading MMLU-Pro test data...");
+        let rows = download_parquet_records(url, 3, 120, "llm-benchmark-runner")?;
+        let items: Vec<MmluItem> = rows
+            .iter()
+            .map(|r| MmluItem {
+                question: r
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                options: r
+                    .get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                cot_content: r
+                    .get("cot_content")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                answer: r
+                    .get("answer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                category: r
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+            .collect();
+        fs::write(&path, serde_json::to_vec(&items)?)?;
         Ok(path)
     }
 
@@ -290,35 +323,35 @@ impl Benchmark for MmluProBenchmark {
     }
 }
 
+static RE_ANSWER_IS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\banswer is\s*\(?([A-J])\)?").unwrap());
+static RE_ANSWER_COLON: Lazy<Regex> = Lazy::new(|| Regex::new(r"[aA]nswer:\s*([A-J])").unwrap());
+static RE_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-J])\b").unwrap());
+static RE_SEQUENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[A-J][\s]*[,;:]\s*[A-J]").unwrap());
+
 fn extract_answer(text: &str) -> Option<char> {
     // Scan entire text for answer patterns, use the last match
-    let re1 = Regex::new(r"\banswer is\s*\(?([A-J])\)?").ok()?;
-    let last = re1.captures_iter(text).last();
+    let last = RE_ANSWER_IS.captures_iter(text).last();
     if let Some(caps) = last {
         if let Some(m) = caps.get(1) {
             return m.as_str().chars().next();
         }
     }
 
-    let re2 = Regex::new(r"[aA]nswer:\s*([A-J])").ok()?;
-    let last = re2.captures_iter(text).last();
+    let last = RE_ANSWER_COLON.captures_iter(text).last();
     if let Some(caps) = last {
         if let Some(m) = caps.get(1) {
             return m.as_str().chars().next();
         }
     }
 
-    // Final: last single letter from A-J, excluding those followed by comma/semicolon and another letter (e.g., "A, B")
-    let re_letter = Regex::new(r"\b([A-J])\b").ok()?;
-    let re_sequence = Regex::new(r"[A-J][\s]*[,;:]\s*[A-J]").ok()?;
+    // Final: last single letter from A-J, excluding those part of a sequence (e.g., "A, B")
     let mut last_letter = None;
-    for caps in re_letter.captures_iter(text) {
+    for caps in RE_LETTER.captures_iter(text) {
         if let Some(letter_match) = caps.get(1) {
             let letter_start = letter_match.start();
-            // Check if this letter is part of a sequence pattern (e.g., "A, B")
             let context = &text[letter_start..text.len().min(letter_start + 6)];
-            if re_sequence.find(context).is_some() {
-                // This letter is part of a sequence, skip it
+            if RE_SEQUENCE.find(context).is_some() {
                 continue;
             }
             last_letter = letter_match.as_str().chars().next();

@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
-use anyhow::Result;
-use serde::Deserialize;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -36,7 +36,7 @@ impl Default for XSumBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // narrative_link kept for schema alignment
 struct XSumItem {
     document: String,
@@ -45,47 +45,46 @@ struct XSumItem {
     narrative_link: String,
 }
 
-fn load_xsum_dataset() -> Vec<XSumItem> {
+fn load_xsum_dataset() -> Result<Vec<XSumItem>> {
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("xsum");
-    let path = cache_dir.join("XSum.csv");
+    let path = cache_dir.join("XSum.json");
+    let url =
+        "https://huggingface.co/datasets/EdinburghNLP/xsum/resolve/main/data/test-00000-of-00001.parquet";
 
     if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached XSum");
-        return parse_xsum_csv(&content);
+        let content = fs::read_to_string(&path)?;
+        return serde_json::from_str(&content).context("parse cached XSum");
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    fs::create_dir_all(&cache_dir).context("create xsum cache dir")?;
     println!("  Downloading XSum dataset...");
-    let url = "https://huggingface.co/datasets/EdinburghNLP/xsum/resolve/main/test.csv";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-        .expect("Failed to download XSum");
-
-    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
-    let items = parse_xsum_csv(&content);
-    fs::write(&path, &bytes).expect("Failed to save XSum");
-    items
-}
-
-fn parse_xsum_csv(content: &str) -> Vec<XSumItem> {
-    let mut items = Vec::new();
-    for line in content.lines().skip(1) {
-        if line.is_empty() {
-            continue;
-        }
-        // CSV with 3 columns: document, summary, narrative_link
-        let fields: Vec<&str> = line.split(",").collect();
-        if fields.len() >= 3 {
-            items.push(XSumItem {
-                document: fields[0].trim_matches('"').to_string(),
-                summary: fields[1].trim_matches('"').to_string(),
-                narrative_link: fields[2].trim_matches('"').to_string(),
-            });
-        }
-    }
-    items
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
+        .context("download XSum parquet")?;
+    let items: Vec<XSumItem> = rows
+        .iter()
+        .map(|r| XSumItem {
+            document: r
+                .get("document")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            summary: r
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            narrative_link: r
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .collect();
+    fs::write(&path, serde_json::to_vec(&items)?).context("save XSum cache")?;
+    Ok(items)
 }
 
 impl Benchmark for XSumBenchmark {
@@ -102,7 +101,7 @@ impl Benchmark for XSumBenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let items = load_xsum_dataset();
+        let items = load_xsum_dataset()?;
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;

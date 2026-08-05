@@ -43,39 +43,90 @@ struct EAItem {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)] // entity fields kept for schema alignment
 struct Entity {
-    entity: String,
-    #[serde(rename = "entity_type")]
-    entity_type: String,
-    translation: Vec<String>,
+    translation: String,
+    #[serde(default)]
+    mention: String,
 }
+
+/// Raw schema of the current EA-MT per-language JSONL files.
+#[derive(Debug, Deserialize)]
+struct RawEAItem {
+    id: String,
+    #[serde(rename = "source_locale")]
+    source_language: String,
+    #[serde(rename = "target_locale")]
+    target_language: String,
+    source: String,
+    targets: Vec<RawTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTarget {
+    translation: String,
+    #[serde(default)]
+    mention: String,
+}
+
+impl From<RawEAItem> for EAItem {
+    fn from(r: RawEAItem) -> Self {
+        let entities: Vec<Entity> = r
+            .targets
+            .into_iter()
+            .map(|t| Entity {
+                translation: t.translation,
+                mention: t.mention,
+            })
+            .collect();
+        let target = entities
+            .first()
+            .map(|e| e.translation.clone())
+            .unwrap_or_default();
+        EAItem {
+            sentence_id: r.id,
+            source_language: r.source_language,
+            target_language: r.target_language,
+            sentence: r.source,
+            target,
+            entities,
+        }
+    }
+}
+
+/// EA-MT test languages available in the HuggingFace repo (data/test/<locale>.jsonl).
+const EA_MT_TEST_LOCALES: &[&str] = &[
+    "ar_AE", "de_DE", "es_ES", "fr_FR", "it_IT", "ja_JP", "ko_KR", "th_TH", "tr_TR", "zh_TW",
+];
 
 fn load_eamt_dataset() -> Vec<EAItem> {
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("ea_mt");
-    let path = cache_dir.join("ea-mt-benchmark.json");
-
-    if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached EA-MT");
-        let parsed: EAMTDataset = serde_json::from_str(&content).expect("Failed to parse EA-MT");
-        return parsed.data;
-    }
-
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
-    println!("  Downloading EA-MT (Entity-Aware Machine Translation) dataset...");
-    let url = "https://huggingface.co/datasets/sapienzanlp/ea-mt-benchmark/resolve/main/ea-mt-benchmark.json";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-        .expect("Failed to download EA-MT");
 
-    let parsed: EAMTDataset = serde_json::from_slice(&bytes).expect("Failed to parse EA-MT");
-    fs::write(&path, &bytes).expect("Failed to save EA-MT");
-    parsed.data
-}
-
-#[derive(Debug, Deserialize)]
-struct EAMTDataset {
-    data: Vec<EAItem>,
+    let mut items = Vec::new();
+    for locale in EA_MT_TEST_LOCALES {
+        let path = cache_dir.join(format!("test-{}.jsonl", locale));
+        if !path.exists() {
+            println!("  Downloading EA-MT test ({})...", locale);
+            let url = format!(
+                "https://huggingface.co/datasets/sapienzanlp/ea-mt-benchmark/resolve/main/data/test/{}.jsonl",
+                locale
+            );
+            let bytes = download_with_retry_bytes(&url, 3, 60, "llm-benchmark-runner")
+                .expect("Failed to download EA-MT");
+            fs::write(&path, &bytes).expect("Failed to save EA-MT");
+        }
+        let content = fs::read_to_string(&path).expect("Failed to read cached EA-MT");
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let raw: RawEAItem = serde_json::from_str(line).expect("Failed to parse EA-MT line");
+            items.push(EAItem::from(raw));
+        }
+    }
+    items
 }
 
 impl Benchmark for EAMTBenchmark {

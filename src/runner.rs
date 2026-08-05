@@ -324,3 +324,44 @@ pub fn stop_model(cmd_stop: &Option<String>, mut process: Child) {
         .output();
     let _ = process.wait();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn wait_for_health_returns_true_for_healthy_proxy() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"test-model"}]}"#)
+            .expect(2)
+            .create();
+        let client = Client::new(&server.url()).unwrap();
+        assert!(wait_for_health(&client));
+        mock.assert();
+    }
+
+    #[test]
+    fn model_process_guard_sets_and_clears_pid() {
+        let child = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        let pid = child.id() as u64;
+        let mut guard = ModelProcessGuard::new(child, None);
+        assert_eq!(
+            *CURRENT_MODEL_PID
+                .lock()
+                .expect(crate::shared::MUTEX_PANIC_MSG),
+            Some(pid)
+        );
+        guard.stop();
+        assert_eq!(
+            *CURRENT_MODEL_PID
+                .lock()
+                .expect(crate::shared::MUTEX_PANIC_MSG),
+            None
+        );
+    }
+}

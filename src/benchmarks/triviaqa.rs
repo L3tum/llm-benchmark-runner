@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for TriviaQABenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // question_source kept for schema alignment
 struct TriviaQARow {
     question: String,
@@ -37,39 +37,47 @@ struct TriviaQARow {
     question_source: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TriviaQAEntity {
     title: String,
 }
 
-fn load_trivia_qa() -> Vec<TriviaQARow> {
+fn load_trivia_qa() -> Result<Vec<TriviaQARow>> {
+    use anyhow::Context;
     let cache_dir = dirs::cache_dir()
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("trivia_qa");
     let path = cache_dir.join("rc.nocontext.json");
+    let url =
+        "https://huggingface.co/datasets/mandarjoshi/trivia_qa/resolve/main/rc.nocontext/validation-00000-of-00001.parquet";
 
     if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached TriviaQA");
-        return serde_json::from_str(&content).expect("Failed to parse TriviaQA");
+        let content = fs::read_to_string(&path)?;
+        return serde_json::from_str(&content).context("parse cached TriviaQA");
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    fs::create_dir_all(&cache_dir).context("create trivia_qa cache dir")?;
     println!("  Downloading TriviaQA (rc.nocontext) dataset...");
-    let url =
-        "https://huggingface.co/datasets/mandarjoshi/trivia_qa/resolve/main/rc/nocontext.json";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
-        .expect("Failed to download TriviaQA");
-
-    let dataset: TriviaQADataset = serde_json::from_slice(&bytes).unwrap();
-    let rows = dataset.data;
-    fs::write(&path, &bytes).expect("Failed to save TriviaQA");
-    rows
-}
-
-#[derive(Debug, Deserialize)]
-struct TriviaQADataset {
-    data: Vec<TriviaQARow>,
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
+        .context("download TriviaQA parquet")?;
+    let items: Vec<TriviaQARow> = rows
+        .iter()
+        .map(|r| TriviaQARow {
+            question: r
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            entity_pages: None,
+            question_source: r
+                .get("question_source")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        })
+        .collect();
+    fs::write(&path, serde_json::to_vec(&items)?).context("save TriviaQA cache")?;
+    Ok(items)
 }
 
 impl Benchmark for TriviaQABenchmark {
@@ -86,7 +94,7 @@ impl Benchmark for TriviaQABenchmark {
     }
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
-        let items = load_trivia_qa();
+        let items = load_trivia_qa()?;
         let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
         state.items = items;
         state.current_idx = 0;

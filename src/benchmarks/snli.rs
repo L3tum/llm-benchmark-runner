@@ -1,6 +1,6 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{
     fence_prompt_value, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult,
 };
@@ -46,104 +46,50 @@ fn load_snli_dataset(max_items: usize) -> Result<Vec<SnliItem>> {
     let path = cache_dir.join("snli_test.json");
 
     if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached SNLI");
-        let items: Vec<SnliItem> =
-            serde_json::from_str(&content).context("Failed to parse SNLI")?;
+        let content = fs::read_to_string(&path).context("read cached SNLI")?;
+        let items: Vec<SnliItem> = serde_json::from_str(&content).context("parse cached SNLI")?;
         return Ok(items.into_iter().take(max_items).collect());
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    fs::create_dir_all(&cache_dir).context("create snli cache dir")?;
     println!(
         "  Downloading SNLI dataset (test split, up to {} instances)...",
         max_items
     );
 
-    // SNLI on HuggingFace — use the test split
-    let url = "https://huggingface.co/datasets/stanfordnlp/snli/resolve/main/snli_1.0_test.jsonl";
-    match download_with_retry_bytes(url, 3, 120, "llm-benchmark-runner") {
-        Ok(bytes) => {
-            let content = String::from_utf8(bytes.to_vec()).expect("Failed to decode UTF-8");
-            let mut items = Vec::new();
-            for line in content.lines() {
-                if items.len() >= max_items || line.is_empty() {
-                    continue;
-                }
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                    let sentence1 = val
-                        .get("sentence1")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let sentence2 = val
-                        .get("sentence2")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let gold_label = match val.get("gold_label").and_then(|l| l.as_str()) {
-                        Some(label) if label != "-" => label.to_string(),
-                        _ => continue,
-                    };
-                    items.push(SnliItem {
-                        sentence1,
-                        sentence2,
-                        gold_label,
-                    });
-                }
-            }
-            fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-                .expect("Failed to save SNLI");
-            return Ok(items);
-        }
-        Err(e) => {
-            eprintln!("  Failed to download SNLI: {}", e);
-        }
-    }
+    // SNLI on HuggingFace is hosted as a parquet shard (plain_text/test).
+    let url = "https://huggingface.co/datasets/stanfordnlp/snli/resolve/main/plain_text/test-00000-of-00001.parquet";
+    let rows = download_parquet_records(url, 3, 120, "llm-benchmark-runner")?;
 
-    // Fallback: try alternate source
-    let url2 = "https://raw.githubusercontent.com/salesforce/SNLI/master/snli_1.0_test.jsonl";
-    match download_with_retry_bytes(url2, 2, 120, "llm-benchmark-runner") {
-        Ok(bytes) => {
-            let content = String::from_utf8(bytes.to_vec()).expect("Failed to decode UTF-8");
-            let mut items = Vec::new();
-            for line in content.lines() {
-                if items.len() >= max_items || line.is_empty() {
-                    continue;
-                }
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                    let sentence1 = val
-                        .get("sentence1")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let sentence2 = val
-                        .get("sentence2")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let gold_label = match val.get("gold_label").and_then(|l| l.as_str()) {
-                        Some(label) if label != "-" => label.to_string(),
-                        _ => continue,
-                    };
-                    items.push(SnliItem {
-                        sentence1,
-                        sentence2,
-                        gold_label,
-                    });
-                }
-            }
-            fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-                .expect("Failed to save SNLI");
-            return Ok(items);
+    let mut items = Vec::new();
+    for r in rows {
+        if items.len() >= max_items {
+            break;
         }
-        Err(e) => {
-            eprintln!("  Failed to download SNLI from fallback: {}", e);
-        }
+        let sentence1 = r
+            .get("premise")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let sentence2 = r
+            .get("hypothesis")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let gold_label = match r.get("label").and_then(|v| v.as_i64()) {
+            Some(0) => "entailment".to_string(),
+            Some(1) => "neutral".to_string(),
+            Some(2) => "contradiction".to_string(),
+            _ => continue,
+        };
+        items.push(SnliItem {
+            sentence1,
+            sentence2,
+            gold_label,
+        });
     }
-
-    Err(anyhow::anyhow!(
-        "Could not download SNLI dataset. Please manually download and place at: {}",
-        path.display()
-    ))
+    fs::write(&path, serde_json::to_string_pretty(&items)?).context("save SNLI")?;
+    Ok(items)
 }
 
 impl Benchmark for SnliBenchmark {

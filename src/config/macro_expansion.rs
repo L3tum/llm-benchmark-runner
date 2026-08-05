@@ -265,11 +265,15 @@ fn interpolate_string(s: &str, vars: &HashMap<String, String>, path: &str) -> Re
             let mut key = String::new();
             while let Some(&c) = chars.peek() {
                 if c == '}' {
-                    chars.next();
+                    chars.next(); // consume the first }
                     if let Some(&'}') = chars.peek() {
                         chars.next(); // consume closing }
                         break;
                     }
+                    // A single '}' not followed by another '}' is part of the
+                    // variable name; keep it and do not consume extra characters.
+                    key.push('}');
+                    continue;
                 }
                 key.push(c);
                 chars.next();
@@ -322,6 +326,20 @@ mod tests {
         let vars = HashMap::new();
         let result = interpolate_string("Hello!", &vars, "test").unwrap();
         assert_eq!(result, "Hello!");
+    }
+
+    #[test]
+    fn test_stray_brace_in_variable_name() {
+        let vars = HashMap::from([("na}me".to_string(), "World".to_string())]);
+        let result = interpolate_string("Hello {{na}me}}!", &vars, "test").unwrap();
+        assert_eq!(result, "Hello World!");
+    }
+
+    #[test]
+    fn test_stray_brace_preserves_following_char() {
+        let vars = HashMap::from([("na}me".to_string(), "World".to_string())]);
+        let result = interpolate_string("{{na}me}}", &vars, "test").unwrap();
+        assert_eq!(result, "World");
     }
 
     #[test]

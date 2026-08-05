@@ -356,12 +356,13 @@ impl Benchmark for KldBenchmark {
             all_logits.insert(name.clone(), entries);
         }
 
-        // If any model is missing KLD data, return a clear error instead of silently ignoring it.
+        // If any model is missing KLD data, warn and continue so pairwise
+        // comparisons among the available models are still computed.
         if !missing_models.is_empty() {
-            return Err(anyhow::anyhow!(
-                "KLD post-execute: missing KLD data for models: {} (these models failed to produce KLD scores)",
+            eprintln!(
+                "WARNING: KLD post-execute: missing KLD data for models: {} (these models failed to produce KLD scores, will be excluded from pairwise analysis)",
                 missing_models.join(", ")
-            ));
+            );
         }
 
         let names: Vec<String> = all_logits.keys().cloned().collect();

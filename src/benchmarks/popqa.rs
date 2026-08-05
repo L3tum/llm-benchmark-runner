@@ -5,7 +5,7 @@ use crate::shared::{
     fence_prompt_value, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult,
 };
 use crate::token_tracker::TokenTracker;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -49,68 +49,51 @@ fn load_popqa_dataset(max_items: usize) -> Result<Vec<PopQAItem>> {
         .join("llm-benchmark-runner")
         .join("popqa");
     let path = cache_dir.join("popqa.json");
+    let url = "https://huggingface.co/datasets/akariasai/PopQA/resolve/main/test.tsv";
 
     if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached PopQA");
-        let items: Vec<PopQAItem> =
-            serde_json::from_str(&content).context("Failed to parse PopQA")?;
+        let content = fs::read_to_string(&path)?;
+        let items: Vec<PopQAItem> = serde_json::from_str(&content)?;
         return Ok(items.into_iter().take(max_items).collect());
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    fs::create_dir_all(&cache_dir)?;
     println!(
         "  Downloading PopQA dataset (up to {} instances)...",
         max_items
     );
 
-    // PopQA on HuggingFace
-    let url = "https://huggingface.co/datasets/akariasai/PopQA/resolve/main/popqa.json";
-    match download_with_retry_bytes(url, 3, 120, "llm-benchmark-runner") {
-        Ok(bytes) => {
-            let items: Vec<PopQAItem> =
-                serde_json::from_slice(&bytes).expect("Failed to parse PopQA");
-            // Filter to items with answers
-            let items: Vec<PopQAItem> = items
-                .into_iter()
-                .filter(|i| i.answer_argument.is_some() || i.answer_argument_name.is_some())
-                .collect();
-            let items: Vec<PopQAItem> = items.into_iter().take(max_items).collect();
-            fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-                .expect("Failed to save PopQA");
-            return Ok(items);
+    // akariasai/PopQA ships a tab-separated test.tsv (header + rows).
+    let bytes = download_with_retry_bytes(url, 3, 120, "llm-benchmark-runner")?;
+    let content = String::from_utf8(bytes.to_vec())?;
+    let mut items = Vec::new();
+    for line in content.lines().skip(1) {
+        if items.len() >= max_items {
+            break;
         }
-        Err(e) => {
-            eprintln!("  Failed to download PopQA: {}", e);
+        if line.trim().is_empty() {
+            continue;
         }
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 17 {
+            continue;
+        }
+        let obj = f[3].trim();
+        if obj.is_empty() {
+            continue;
+        }
+        items.push(PopQAItem {
+            question: f[15].trim().to_string(),
+            subject_id: Some(f[4].trim().to_string()),
+            relation_id: Some(f[5].trim().to_string()),
+            answer_argument: Some(f[6].trim().to_string()),
+            answer_argument_name: Some(obj.to_string()),
+        });
     }
-
-    // Fallback: alternate URL
-    let url2 = "https://huggingface.co/datasets/akariasai/PopQA/resolve/main/data/popqa.json";
-    match download_with_retry_bytes(url2, 2, 120, "llm-benchmark-runner") {
-        Ok(bytes) => {
-            let items: Vec<PopQAItem> =
-                serde_json::from_slice(&bytes).expect("Failed to parse PopQA");
-            let items: Vec<PopQAItem> = items
-                .into_iter()
-                .filter(|i| i.answer_argument.is_some() || i.answer_argument_name.is_some())
-                .collect();
-            let items: Vec<PopQAItem> = items.into_iter().take(max_items).collect();
-            fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-                .expect("Failed to save PopQA");
-            return Ok(items);
-        }
-        Err(e) => {
-            eprintln!("  Failed to download PopQA from fallback: {}", e);
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "Could not download PopQA dataset. Please manually download and place at: {}",
-        path.display()
-    ))
+    fs::write(&path, serde_json::to_string_pretty(&items)?).expect("Failed to save PopQA");
+    Ok(items.into_iter().take(max_items).collect())
 }
 
-/// Check if the response contains the target entity (case-insensitive substring match).
 fn contains_entity(response: &str, entity: &str) -> bool {
     if entity.is_empty() {
         return false;

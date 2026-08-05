@@ -1,6 +1,6 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::reports::model::{BreakdownTable, Diagnostic};
 use crate::shared::{
     fence_prompt_value, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult,
@@ -47,6 +47,8 @@ fn load_truthfulqa_gen(max_items: usize) -> Result<Vec<TruthfulQAGenItem>> {
         .join("llm-benchmark-runner")
         .join("truthfulqa");
     let path = cache_dir.join("truthfulqa_gen.json");
+    let url =
+        "https://huggingface.co/datasets/truthfulqa/truthful_qa/resolve/main/generation/validation-00000-of-00001.parquet";
 
     if path.exists() {
         let content = fs::read_to_string(&path).expect("Failed to read cached TruthfulQA-Gen");
@@ -61,120 +63,55 @@ fn load_truthfulqa_gen(max_items: usize) -> Result<Vec<TruthfulQAGenItem>> {
         max_items
     );
 
-    // Use the same source as truthful_qa.rs — generation.csv
-    let url = "https://huggingface.co/datasets/truthfulqa/truthful_qa/resolve/main/generation.csv";
-    match download_with_retry_bytes(url, 3, 120, "llm-benchmark-runner") {
-        Ok(bytes) => {
-            let content = String::from_utf8(bytes.to_vec()).expect("Failed to decode UTF-8");
-            let items = parse_truthfulqa_gen_csv(&content, max_items);
-            fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-                .expect("Failed to save TruthfulQA-Gen");
-            return Ok(items);
+    let rows = download_parquet_records(url, 3, 120, "llm-benchmark-runner")?;
+    let mut items = Vec::new();
+    for r in rows {
+        if items.len() >= max_items {
+            break;
         }
-        Err(e) => {
-            eprintln!("  Failed to download TruthfulQA generation: {}", e);
-        }
+        items.push(TruthfulQAGenItem {
+            question: r
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            best_answers: r
+                .get("correct_answers")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            false_answers: r
+                .get("incorrect_answers")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            type_: r
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            category: r
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        });
     }
-
-    // Fallback: try to use existing truthful_qa cache if available
-    let existing_path = cache_dir.join("generation.csv");
-    if existing_path.exists() {
-        let content =
-            fs::read_to_string(&existing_path).expect("Failed to read cached TruthfulQA CSV");
-        let items = parse_truthfulqa_gen_csv(&content, max_items);
-        fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-            .expect("Failed to save TruthfulQA-Gen");
-        return Ok(items);
-    }
-
-    Err(anyhow::anyhow!(
-        "Could not download TruthfulQA generation dataset. Please manually download and place at: {}",
-        path.display()
-    ))
+    fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
+        .expect("Failed to save TruthfulQA-Gen");
+    Ok(items)
 }
 
 /// Parse the TruthfulQA generation CSV format.
 /// CSV columns: question,best_answers,false_answers,type,category
-fn parse_truthfulqa_gen_csv(content: &str, max_items: usize) -> Vec<TruthfulQAGenItem> {
-    let mut items = Vec::new();
-    let mut lines = content.lines();
-
-    // Skip header
-    if let Some(header) = lines.next() {
-        // Header line — verify format
-        if !header.contains("question") {
-            // Not a CSV with expected header, try treating first line as data
-            return Vec::new();
-        }
-    }
-
-    for line in lines {
-        if items.len() >= max_items || line.trim().is_empty() {
-            break;
-        }
-
-        // Parse CSV line carefully (fields can contain commas in quotes)
-        let fields = parse_csv_line(line);
-        if fields.len() >= 5 {
-            let question = fields[0].trim_matches('"').trim().to_string();
-            if question.is_empty() {
-                continue;
-            }
-
-            // best_answers and false_answers are pipe-separated within the field
-            let best_raw = fields[1].trim_matches('"').trim().to_string();
-            let false_raw = fields[2].trim_matches('"').trim().to_string();
-            let type_ = fields[3].trim_matches('"').trim().to_string();
-            let category = fields[4].trim_matches('"').trim().to_string();
-
-            let best_answers = best_raw
-                .split('|')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let false_answers = false_raw
-                .split('|')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            items.push(TruthfulQAGenItem {
-                question,
-                best_answers,
-                false_answers,
-                type_,
-                category,
-            });
-        }
-    }
-
-    items
-}
-
-/// Simple CSV parser that handles quoted fields with commas.
-fn parse_csv_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-
-    for ch in line.chars() {
-        match ch {
-            '"' => {
-                in_quotes = !in_quotes;
-            }
-            ',' if !in_quotes => {
-                fields.push(current.clone());
-                current.clear();
-            }
-            _ => {
-                current.push(ch);
-            }
-        }
-    }
-    fields.push(current);
-    fields
-}
-
 /// Score the model's answer using keyword matching.
 /// Based on the TruthfulQA generation scoring methodology:
 /// - Positive score for matching "best answer" keywords
@@ -473,21 +410,6 @@ Answer:"#;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_csv_line_simple() {
-        let fields = parse_csv_line("hello,world,test");
-        assert_eq!(
-            fields,
-            vec!["hello".to_string(), "world".to_string(), "test".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_parse_csv_line_quoted() {
-        let fields = parse_csv_line("\"hello, world\",test");
-        assert_eq!(fields, vec!["hello, world".to_string(), "test".to_string()]);
-    }
 
     #[test]
     fn test_score_truthfulness_empty() {

@@ -29,12 +29,13 @@ impl Default for IFEvalBenchmark {
     }
 }
 
-const IFEVAL_URL: &str = "https://huggingface.co/datasets/google/IFEval/resolve/main/IFEval.json";
+const IFEVAL_URL: &str =
+    "https://huggingface.co/datasets/google/IFEval/resolve/main/ifeval_input_data.jsonl";
 
 #[derive(Debug, Clone, Deserialize)]
 struct IFEvalRow {
     prompt: String,
-    #[serde(rename = "instruction_id")]
+    #[serde(rename = "instruction_id_list")]
     instruction_ids: Vec<String>,
 }
 
@@ -57,21 +58,27 @@ fn load_ifeval_dataset() -> Result<Vec<IFEvalRow>> {
         .unwrap_or_default()
         .join("llm-benchmark-runner")
         .join("ifeval");
-    let path = cache_dir.join("IFEval.json");
+    let path = cache_dir.join("ifeval_input_data.jsonl");
 
     if path.exists() {
-        let content = fs::read_to_string(&path)?;
-        return Ok(serde_json::from_str(&content)?);
+        return parse_ifeval_jsonl(&fs::read_to_string(&path)?);
     }
 
     fs::create_dir_all(&cache_dir)?;
     println!("  Downloading IFEval dataset...");
     let bytes = download_with_retry_bytes(IFEVAL_URL, 3, 60, "llm-benchmark-runner")?;
-    let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    fs::write(&tmp_path, bytes)?;
+    let tmp_path = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+    fs::write(&tmp_path, &bytes)?;
     fs::rename(&tmp_path, &path).context("failed to rename IFEval download")?;
-    let content = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&content)?)
+    parse_ifeval_jsonl(&String::from_utf8_lossy(&bytes))
+}
+
+/// Parse a JSONL document (one JSON object per line) into rows.
+fn parse_ifeval_jsonl(content: &str) -> Result<Vec<IFEvalRow>> {
+    content
+        .lines()
+        .map(|line| -> Result<IFEvalRow> { Ok(serde_json::from_str(line)?) })
+        .collect()
 }
 
 fn create_verifiers(instruction_ids: &[String]) -> Vec<InstructionVerifier> {

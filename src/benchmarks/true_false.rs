@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ impl Default for TrueFalseBenchmark {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrueFalseItem {
     statement: String,
     label: String, // "True", "False"
@@ -41,6 +41,8 @@ fn load_true_false_dataset() -> Vec<TrueFalseItem> {
         .join("llm-benchmark-runner")
         .join("true_false");
     let path = cache_dir.join("statements.json");
+    let url =
+        "https://huggingface.co/datasets/truthfulqa/truthful_qa/resolve/main/generation/validation-00000-of-00001.parquet";
 
     if path.exists() {
         let content = fs::read_to_string(&path).expect("Failed to read cached True-False dataset");
@@ -50,28 +52,36 @@ fn load_true_false_dataset() -> Vec<TrueFalseItem> {
     fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
     println!("  Downloading True-False dataset from TruthfulQA...");
 
-    let url = "https://huggingface.co/datasets/truthfulqa/truthful_qa/resolve/main/generation.csv";
-    let bytes = download_with_retry_bytes(url, 3, 60, "llm-benchmark-runner")
+    let rows = download_parquet_records(url, 3, 60, "llm-benchmark-runner")
         .expect("Failed to download TruthfulQA generation dataset");
-
-    let content = String::from_utf8(Vec::from(bytes.as_ref())).expect("Failed to decode UTF-8");
     let mut items = Vec::new();
-    for line in content.lines().skip(1) {
-        if line.is_empty() {
-            continue;
+    for r in rows {
+        // TruthfulQA `best_answer` is the verified-true answer; `incorrect_answers`
+        // are the false misconceptions. Use those as the True/False statements.
+        if let Some(ba) = r.get("best_answer").and_then(|v| v.as_str()) {
+            if !ba.trim().is_empty() {
+                items.push(TrueFalseItem {
+                    statement: ba.to_string(),
+                    label: "True".to_string(),
+                });
+            }
         }
-        let fields: Vec<&str> = line.split(",").collect();
-        if fields.len() >= 6 {
-            let question = fields[0].trim_matches('"').to_string();
-            let label = fields[5].trim_matches('"').to_string();
-            items.push(TrueFalseItem {
-                statement: question,
-                label,
-            });
+        if let Some(fa) = r.get("incorrect_answers").and_then(|v| v.as_array()) {
+            for a in fa.iter().filter_map(|x| x.as_str()) {
+                if !a.trim().is_empty() {
+                    items.push(TrueFalseItem {
+                        statement: a.to_string(),
+                        label: "False".to_string(),
+                    });
+                }
+            }
         }
     }
-
-    fs::write(&path, &bytes).expect("Failed to save True-False dataset");
+    fs::write(
+        &path,
+        serde_json::to_vec(&items).expect("Failed to save True-False dataset"),
+    )
+    .expect("Failed to save True-False dataset");
     items
 }
 

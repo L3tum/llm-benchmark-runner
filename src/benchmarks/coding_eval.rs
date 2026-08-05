@@ -1,6 +1,7 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry;
+use crate::docker_runner::{DockerMount, DockerRunConfig, DockerRunner};
+use crate::download::download_with_retry_bytes_sha256;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
@@ -8,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -100,9 +102,24 @@ const HUMANEVAL_PLUS_URL: &str = "https://github.com/evalplus/humanevalplus_rele
 const MBPP_PLUS_URL: &str =
     "https://github.com/evalplus/mbppplus_release/releases/download/v0.2.0/MbppPlus.jsonl.gz";
 const HUMAN_EVAL_URL: &str =
-    "https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz";
-#[allow(dead_code)] // used for Docker-based coding benchmarks
+    "https://raw.githubusercontent.com/openai/human-eval/6d43fb980f9fee3c892a914eda09951f772ad10d/data/HumanEval.jsonl.gz";
+// Python image used to run coding-eval harnesses in a sandboxed container.
 const DEFAULT_DOCKER_IMAGE: &str = "python:3.12";
+
+/// Pinned SHA-256 digests for the auto-downloaded coding-eval datasets,
+/// computed from the exact bytes served by each pinned URL (fetched 2026-08-04).
+/// A mismatch causes the download to fail rather than silently use tampered data.
+fn pinned_checksum(task_type: TaskType) -> Option<&'static str> {
+    match task_type {
+        TaskType::HumanEval => {
+            Some("b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef")
+        }
+        TaskType::HumanEvalPlus => {
+            Some("272720b90ac375502c8ed23cd791c2a93dfb22a911641a494da74a426c09f101")
+        }
+        TaskType::Mbpp => Some("af43697e8791c4c149bdfd6b489d8b5412507551ac20e28a439f650b8225db63"),
+    }
+}
 
 fn download_taskset(taskset: &TasksetConfig) -> Result<PathBuf> {
     let (url, filename) = match taskset.task_type {
@@ -116,13 +133,35 @@ fn download_taskset(taskset: &TasksetConfig) -> Result<PathBuf> {
         .join("coding_eval");
     fs::create_dir_all(&cache_dir)?;
     let path = cache_dir.join(filename);
-    if path.exists() {
+    let sha_path = cache_dir.join(format!("{}.sha256", filename));
+
+    // If a cached copy plus a stored checksum exist, verify before reuse.
+    if path.exists() && sha_path.exists() {
+        let stored = fs::read_to_string(&sha_path)?.trim().to_string();
+        let actual = crate::download::sha256_hex(&fs::read(&path)?);
+        if actual.eq_ignore_ascii_case(&stored) {
+            return Ok(path);
+        }
+        // Corrupt cache: remove and re-download below.
+        println!(
+            "  Coding_eval cache checksum mismatch; re-downloading {}",
+            filename
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&sha_path);
+    } else if path.exists() {
+        // Pre-existing cache without a checksum sidecar: accept as-is.
         return Ok(path);
     }
+
     println!("  Downloading coding_eval taskset {}...", taskset.name);
-    let bytes = download_with_retry(url, 3, 60, "llm-benchmark-runner")?
-        .error_for_status()?
-        .bytes()?;
+    let bytes = download_with_retry_bytes_sha256(
+        url,
+        3,
+        60,
+        "llm-benchmark-runner",
+        pinned_checksum(taskset.task_type),
+    )?;
     let tmp_path = path.with_extension(format!(
         "{}.tmp.{}",
         path.extension()
@@ -130,10 +169,12 @@ fn download_taskset(taskset: &TasksetConfig) -> Result<PathBuf> {
             .unwrap_or("download"),
         std::process::id()
     ));
-    fs::write(&tmp_path, bytes)?;
+    fs::write(&tmp_path, &bytes)?;
     fs::rename(&tmp_path, &path).inspect_err(|_rename_err| {
         let _ = fs::remove_file(&tmp_path);
     })?;
+    // Cache the checksum alongside so subsequent runs validate the artifact.
+    fs::write(&sha_path, crate::download::sha256_hex(&bytes))?;
     Ok(path)
 }
 
@@ -378,7 +419,7 @@ impl Benchmark for CodingEvalBenchmark {
         let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
         let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
         let code = extract_code(&response);
-        let passed = run_tests_simple(&prompt, &code, &cfg);
+        let passed = run_coding_test(&item, &code, &cfg);
 
         Ok(Some(
             TaskResult::new(
@@ -524,7 +565,7 @@ impl Benchmark for HumanEvalBenchmark {
         let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
         let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
         let code = extract_code(&response);
-        let passed = run_tests_simple(&prompt, &code, &cfg);
+        let passed = run_coding_test(&item, &code, &cfg);
 
         Ok(Some(
             TaskResult::new(
@@ -601,7 +642,7 @@ impl Benchmark for HumanEvalPlusBenchmark {
         let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
         let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
         let code = extract_code(&response);
-        let passed = run_tests_simple(&prompt, &code, &cfg);
+        let passed = run_coding_test(&item, &code, &cfg);
 
         Ok(Some(
             TaskResult::new(
@@ -678,7 +719,7 @@ impl Benchmark for MbppPlusBenchmark {
         let system_prompt = "You are a coding assistant. Generate a complete solution in Python.";
         let response = tracker.chat_completion(&model.model_name, system_prompt, &prompt)?;
         let code = extract_code(&response);
-        let passed = run_tests_simple(&prompt, &code, &cfg);
+        let passed = run_coding_test(&item, &code, &cfg);
 
         Ok(Some(
             TaskResult::new(
@@ -710,7 +751,198 @@ fn extract_code(response: &str) -> String {
     response.trim().to_string()
 }
 
-fn run_tests_simple(_prompt: &str, _code: &str, _cfg: &CodingEvalConfig) -> bool {
-    // Simplified test runner - in production this would spawn docker/python
-    false
+fn run_coding_test(task_item: &JsonValue, code: &str, cfg: &CodingEvalConfig) -> bool {
+    let entry_point = task_item
+        .get("entry_point")
+        .and_then(|v| v.as_str())
+        .unwrap_or("solution")
+        .to_string();
+    let test_str = task_item
+        .get("test")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let base_input = task_item
+        .get("base_input")
+        .and_then(|v| v.as_array())
+        .cloned();
+    let plus_input = task_item
+        .get("plus_input")
+        .and_then(|v| v.as_array())
+        .cloned();
+    let atol = task_item
+        .get("atol")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1e-6);
+
+    let harness = generate_test_harness(
+        &entry_point,
+        code,
+        &test_str,
+        &base_input,
+        &plus_input,
+        atol,
+    );
+
+    let mut file = match tempfile::NamedTempFile::new() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("coding test: failed to create temp file: {}", e);
+            return false;
+        }
+    };
+    if let Err(e) = file
+        .write_all(harness.as_bytes())
+        .and_then(|_| file.flush())
+    {
+        eprintln!("coding test: failed to write harness: {}", e);
+        return false;
+    }
+    let path = file.path().to_path_buf();
+    let filename = match path.file_name().and_then(|s| s.to_str()) {
+        Some(s) => s.to_string(),
+        None => return false,
+    };
+    let source_dir = match path.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return false,
+    };
+
+    // Mount the directory holding the harness read-only into the container at
+    // /harness (the default /tmp tmpfs is separate) and run it with Python.
+    let image = DEFAULT_DOCKER_IMAGE.to_string();
+    let mut run_config = DockerRunConfig::new(
+        image,
+        vec![
+            "python3".to_string(),
+            "-B".to_string(),
+            format!("/harness/{}", filename),
+        ],
+        cfg.timeout_secs,
+    );
+    run_config.mounts.push(DockerMount {
+        source: source_dir,
+        target: "/harness".to_string(),
+        readonly: true,
+        map_host_repo_path: false,
+    });
+
+    match DockerRunner::run(&run_config) {
+        Ok(result) => result.success(),
+        Err(e) => {
+            eprintln!("coding test: docker runner error: {}", e);
+            false
+        }
+    }
+}
+
+/// Build a self-contained Python harness embedding the solution plus the
+/// task's tests. Prefers the HumanEval-style `test` assertion block when
+/// present; otherwise falls back to input/output pairs (EvalPlus-style).
+fn generate_test_harness(
+    entry_point: &str,
+    code: &str,
+    test_str: &Option<String>,
+    base_input: &Option<Vec<JsonValue>>,
+    plus_input: &Option<Vec<JsonValue>>,
+    atol: f64,
+) -> String {
+    let mut h = String::new();
+    h.push_str("import sys, traceback\n\n");
+    h.push_str(code);
+    h.push_str("\n\n");
+
+    if let Some(tests) = test_str {
+        // HumanEval-style `test` block (self-contained, references entry_point).
+        h.push_str("try:\n");
+        for line in tests.lines() {
+            h.push_str("    ");
+            h.push_str(line);
+            h.push('\n');
+        }
+        h.push_str("    print('TESTS_PASSED')\n");
+        h.push_str("    sys.exit(0)\n");
+        h.push_str("except Exception:\n");
+        h.push_str("    traceback.print_exc()\n");
+        h.push_str("    print('TESTS_FAILED')\n");
+        h.push_str("    sys.exit(1)\n");
+        return h;
+    }
+
+    // EvalPlus-style: iterate base_input / plus_input against entry_point.
+    let mut inputs: Vec<JsonValue> = Vec::new();
+    if let Some(bi) = base_input {
+        inputs.extend(bi.iter().cloned());
+    }
+    if let Some(pi) = plus_input {
+        inputs.extend(pi.iter().cloned());
+    }
+    let inputs_json = serde_json::to_string(&inputs).unwrap_or_else(|_| "[]".to_string());
+    h.push_str(&format!("ATOL = {}\n", atol));
+    h.push_str(&format!("INPUTS = {}\n", inputs_json));
+    h.push_str("def run() -> int:\n");
+    h.push_str("    for i, tc in enumerate(INPUTS):\n");
+    h.push_str("        try:\n");
+    h.push_str(&format!(
+        "            out = {}(**tc.get('input', {{}}))\n",
+        entry_point
+    ));
+    h.push_str("            exp = tc.get('output')\n");
+    h.push_str("            if exp is not None:\n");
+    h.push_str("                if isinstance(out, float) and isinstance(exp, float):\n");
+    h.push_str("                    if abs(out - exp) <= ATOL:\n");
+    h.push_str("                        continue\n");
+    h.push_str("                if out == exp:\n");
+    h.push_str("                    continue\n");
+    h.push_str("            print('FAIL test', i)\n");
+    h.push_str("            return 1\n");
+    h.push_str("        except Exception as e:\n");
+    h.push_str("            print('ERR test', i, repr(e))\n");
+    h.push_str("            return 1\n");
+    h.push_str("    print('TESTS_PASSED')\n");
+    h.push_str("    return 0\n");
+    h.push_str("sys.exit(run())\n");
+    h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn harness_prefers_test_block_for_humaneval() {
+        let h = generate_test_harness(
+            "my_func",
+            "def my_func(x): return x + 1",
+            &Some("assert my_func(1) == 2".to_string()),
+            &None,
+            &None,
+            1e-6,
+        );
+        assert!(h.contains("def my_func(x): return x + 1"));
+        assert!(h.contains("assert my_func(1) == 2"));
+        assert!(h.contains("TESTS_PASSED"));
+    }
+
+    #[test]
+    fn harness_generates_input_loop_for_evalplus() {
+        let inputs = vec![json!({"input": {"x": 1}, "output": 2})];
+        let h = generate_test_harness(
+            "my_func",
+            "def my_func(x): return x + 1",
+            &None,
+            &Some(inputs),
+            &None,
+            1e-6,
+        );
+        assert!(h.contains("my_func(**tc.get('input', {}))"));
+        assert!(h.contains("INPUTS"));
+    }
+
+    #[test]
+    fn harness_falls_back_to_plus_input() {
+        let plus = vec![json!({"input": {}, "output": 3})];
+        let h = generate_test_harness("f", "def f(): return 3", &None, &None, &Some(plus), 1e-6);
+        assert!(h.contains("INPUTS"));
+    }
 }

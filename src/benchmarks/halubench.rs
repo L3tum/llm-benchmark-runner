@@ -1,6 +1,6 @@
 use crate::benchmarks::Benchmark;
 use crate::config::Model;
-use crate::download::download_with_retry_bytes;
+use crate::download::download_parquet_records;
 use crate::shared::{
     fence_prompt_value, BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult,
 };
@@ -50,109 +50,62 @@ fn load_halubench_dataset(max_items: usize) -> Result<Vec<HalUBenchItem>> {
         .join("llm-benchmark-runner")
         .join("halubench");
     let path = cache_dir.join("halubench.json");
+    let url =
+        "https://huggingface.co/datasets/PatronusAI/HaluBench/resolve/main/data/test-00000-of-00001.parquet";
 
     if path.exists() {
-        let content = fs::read_to_string(&path).expect("Failed to read cached HaluBench");
+        let content = fs::read_to_string(&path)?;
         let items: Vec<HalUBenchItem> =
-            serde_json::from_str(&content).context("Failed to parse HaluBench")?;
+            serde_json::from_str(&content).context("parse cached HaluBench")?;
         return Ok(items.into_iter().take(max_items).collect());
     }
 
-    fs::create_dir_all(&cache_dir).expect("Failed to create cache dir");
+    fs::create_dir_all(&cache_dir)?;
     println!(
         "  Downloading HaluBench dataset (up to {} instances)...",
         max_items
     );
 
-    // HaluBench on HuggingFace
-    let urls = [
-        "https://huggingface.co/datasets/tianyi-lab/HaluBench/resolve/main/data.json",
-        "https://huggingface.co/datasets/tianyi-lab/HaluBench/resolve/main/halubench.json",
-        "https://huggingface.co/datasets/tianyi-lab/HaluBench/resolve/main/test.json",
-    ];
-
-    let mut last_err = None;
-    for url in &urls {
-        match download_with_retry_bytes(url, 2, 120, "llm-benchmark-runner") {
-            Ok(bytes) => {
-                // Try direct parse
-                if let Ok(items) = serde_json::from_slice::<Vec<HalUBenchItem>>(&bytes) {
-                    let items: Vec<HalUBenchItem> = items.into_iter().take(max_items).collect();
-                    fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-                        .expect("Failed to save HaluBench");
-                    return Ok(items);
-                }
-                // Try nested structure with common keys
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    // Check for common top-level keys
-                    for key in &["data", "test", "train", "samples", "items"] {
-                        if let Some(arr) = val.get(key).and_then(|v| v.as_array()) {
-                            let mut items = Vec::new();
-                            for obj in arr.iter().take(max_items) {
-                                if let Some(item) = parse_halubench_item(obj) {
-                                    items.push(item);
-                                }
-                            }
-                            if !items.is_empty() {
-                                fs::write(&path, serde_json::to_string_pretty(&items).unwrap())
-                                    .expect("Failed to save HaluBench");
-                                return Ok(items);
-                            }
-                        }
-                    }
-                }
-                eprintln!("  Failed to parse HaluBench from {}", url);
-                last_err = Some(anyhow::anyhow!(
-                    "Failed to parse HaluBench from {} — unexpected format",
-                    url
-                ));
-            }
-            Err(e) => {
-                last_err = Some(anyhow::anyhow!("Failed to download from {}: {}", url, e));
-            }
-        }
-    }
-
-    let err = last_err.unwrap_or(anyhow::anyhow!("No download sources available"));
-    eprintln!("  Error: {}", err);
-    eprintln!(
-        "  Please manually download the HaluBench dataset and place it at: {}",
-        path.display()
-    );
-    Err(err)
+    let rows = download_parquet_records(url, 3, 120, "llm-benchmark-runner")?;
+    let items: Vec<HalUBenchItem> = rows
+        .iter()
+        .map(|r| HalUBenchItem {
+            question: r
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            context: r
+                .get("passage")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            answer: r
+                .get("answer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            label: r
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            dataset: r
+                .get("source_ds")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            task_id: r
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .collect();
+    fs::write(&path, serde_json::to_string_pretty(&items)?)?;
+    Ok(items.into_iter().take(max_items).collect())
 }
 
-fn parse_halubench_item(obj: &serde_json::Value) -> Option<HalUBenchItem> {
-    let question = obj.get("question")?.as_str()?.to_string();
-    let context = obj.get("context")?.as_str()?.to_string();
-    let answer = obj.get("answer")?.as_str()?.to_string();
-    let label = obj
-        .get("label")
-        .and_then(|l| l.as_str())
-        .unwrap_or("true")
-        .to_string();
-    let dataset = obj
-        .get("dataset")
-        .and_then(|d| d.as_str())
-        .unwrap_or("")
-        .to_string();
-    let task_id = obj
-        .get("task_id")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    Some(HalUBenchItem {
-        question,
-        context,
-        answer,
-        label,
-        dataset,
-        task_id,
-    })
-}
-
-/// Check if the model's answer contains the key information from the ground truth.
 fn keyword_match(model_answer: &str, ground_truth: &str) -> bool {
     let model_lower = model_answer.to_lowercase();
     let gt_lower = ground_truth.to_lowercase();

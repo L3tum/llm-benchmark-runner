@@ -217,10 +217,6 @@ fn build_accuracy_report_mixed_categories() {
 fn new_benchmarks_are_registered() {
     assert!(get_benchmark("bbh").is_ok(), "bbh should be registered");
     assert!(
-        get_benchmark("factbench").is_ok(),
-        "factbench should be registered"
-    );
-    assert!(
         get_benchmark("truthful_qa_gen").is_ok(),
         "truthful_qa_gen should be registered"
     );
