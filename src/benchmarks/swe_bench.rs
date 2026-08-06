@@ -252,7 +252,7 @@ impl Benchmark for SweBenchBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench: {} instances", items.len());
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.dataset = SweBenchDataset::Basic;
@@ -267,7 +267,7 @@ impl Benchmark for SweBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -290,7 +290,7 @@ impl Benchmark for SweBenchBenchmark {
 
         // Briefly lock just for HashMap insert
         if let Some(p) = patch {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.generated_patches.insert(idx, p);
         }
         Ok(Some(result))
@@ -306,7 +306,7 @@ impl Benchmark for SweBenchBenchmark {
         task_results: &[TaskResult],
         config: &yaml_serde::Value,
     ) -> Result<Option<Vec<TaskResult>>> {
-        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.generated_patches.is_empty() {
             return Ok(None);
         }
@@ -337,7 +337,7 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Verified: {} instances", items.len());
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -351,7 +351,7 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -374,7 +374,7 @@ impl Benchmark for SweBenchVerifiedBenchmark {
 
         // Briefly lock just for HashMap insert
         if let Some(p) = patch {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.generated_patches.insert(idx, p);
         }
         Ok(Some(result))
@@ -385,7 +385,7 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         task_results: &[TaskResult],
         config: &yaml_serde::Value,
     ) -> Result<Option<Vec<TaskResult>>> {
-        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.generated_patches.is_empty() {
             return Ok(None);
         }
@@ -425,7 +425,7 @@ impl Benchmark for SweBenchProBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Pro: {} instances", items.len());
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -439,7 +439,7 @@ impl Benchmark for SweBenchProBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -462,7 +462,7 @@ impl Benchmark for SweBenchProBenchmark {
 
         // Briefly lock just for HashMap insert
         if let Some(p) = patch {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.generated_patches.insert(idx, p);
         }
         Ok(Some(result))
@@ -473,7 +473,7 @@ impl Benchmark for SweBenchProBenchmark {
         task_results: &[TaskResult],
         config: &yaml_serde::Value,
     ) -> Result<Option<Vec<TaskResult>>> {
-        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.generated_patches.is_empty() {
             return Ok(None);
         }
@@ -513,7 +513,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         prepare_swebench(&cfg)?;
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Multilingual: {} instances", items.len());
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -527,7 +527,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -549,7 +549,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
 
         // Briefly lock just for HashMap insert
         if let Some(p) = patch {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.generated_patches.insert(idx, p);
         }
         Ok(Some(result))
@@ -560,7 +560,7 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         task_results: &[TaskResult],
         config: &yaml_serde::Value,
     ) -> Result<Option<Vec<TaskResult>>> {
-        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.generated_patches.is_empty() {
             return Ok(None);
         }
@@ -1307,8 +1307,8 @@ fn download_hf_rows(cfg: &SweBenchConfig) -> Result<Vec<SweBenchInstance>> {
     Ok(rows)
 }
 
-// Build patch prompt for an SWE-bench instance (used by harness)
-#[allow(dead_code)]
+// Build patch prompt for an SWE-bench instance (used by harness).
+#[allow(dead_code)] // utility kept for harness/prediction prompt generation; not on the hot execute_one path
 fn build_patch_prompt(instance: &SweBenchInstance) -> String {
     format!(
         "You are solving a SWE-Bench repository issue. Return ONLY a unified diff patch. Do not include markdown fences, explanations, or prose.\n\nRepository: {}\nBase commit: {}\nInstance: {}\n\nProblem statement:\n{}\n\nHints:\n{}\n\nReturn the patch now.",

@@ -1,0 +1,33 @@
+{
+  "models": {
+    "MyModel Q4": {
+      "status": "completed",
+      "benchmarks_completed": []
+    },
+    "MyModel Q5": {
+      "status": "completed",
+      "benchmarks_completed": []
+    }
+  },
+  "kld_pairwise": {
+    "avg_kld_to_others": {
+      "MyModel Q4": {
+        "avg_kld_to_others": 0.5,
+        "klds": [0.5],
+        "output_tokens": "1000",
+        "thinking_tokens": "2000"
+      },
+      "MyModel Q5": {
+        "avg_kld_to_others": 0.7,
+        "klds": [0.7],
+        "output_tokens": "1200",
+        "thinking_tokens": "2100"
+      }
+    },
+    "q4-q5": {
+      "models": ["MyModel Q4", "MyModel Q5"],
+      "avg_kld": 0.6,
+      "num_prompts_evaluated": 10
+    }
+  }
+}

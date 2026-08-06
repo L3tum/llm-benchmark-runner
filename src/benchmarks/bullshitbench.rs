@@ -199,7 +199,7 @@ impl Benchmark for BullshitBenchBenchmark {
         let questions = load_bullshitbench_dataset(&cfg)?;
         println!("  BullshitBench: {} questions loaded", questions.len());
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.questions = questions;
         state.current_idx = 0;
         state.config = cfg;
@@ -213,7 +213,7 @@ impl Benchmark for BullshitBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (question, _idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.questions.len() {
                 return Ok(None);
             }

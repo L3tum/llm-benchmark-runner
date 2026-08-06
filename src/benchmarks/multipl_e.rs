@@ -121,7 +121,7 @@ impl Benchmark for MultiPLEBenchmark {
             cfg.languages.len()
         );
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -137,7 +137,7 @@ impl Benchmark for MultiPLEBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id, _cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -162,7 +162,7 @@ impl Benchmark for MultiPLEBenchmark {
 
         // Store generated code for batch evaluation
         {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state
                 .generated_code
                 .insert(task_id.clone(), generated_code.clone());
@@ -195,7 +195,7 @@ impl Benchmark for MultiPLEBenchmark {
         task_results: &[TaskResult],
         _config: &yaml_serde::Value,
     ) -> Result<Option<Vec<TaskResult>>> {
-        let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
 
         // If no generated code was stored, nothing to batch-evaluate
         if state.generated_code.is_empty() {

@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
-use crate::utils::extract_task_stats;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -20,19 +20,20 @@ pub struct MorseCodeToolsBenchmark {
     state: Mutex<MorseCodeState>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct MorseCodeState {
     instances: Vec<MorseInstance>,
     current_idx: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct MorseInstance {
     text: String,
     morse: String,
     direction: MorseDirection,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum MorseDirection {
     Encode,
     Decode,
@@ -200,7 +201,7 @@ impl Benchmark for MorseCodeBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         load_config(
-            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            &mut self.state.lock().unwrap_or_else(|p| p.into_inner()),
             config,
         );
         Ok(())
@@ -213,7 +214,7 @@ impl Benchmark for MorseCodeBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -270,50 +271,7 @@ impl Benchmark for MorseCodeBenchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let (total, correct, output_tokens, thinking_tokens) = extract_task_stats(&b.raw);
-
-        let accuracy = if total > 0 {
-            correct as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "accuracy".to_string(),
-            Score::float(accuracy, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        scores.insert("total".to_string(), Score::integer(total, ScoreUnit::Count));
-        scores.insert(
-            "correct".to_string(),
-            Score::integer(correct, ScoreUnit::Count).higher_is_better(true),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
-
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!("Morse Code: {} correct out of {}", correct, total),
-            }],
-            raw: b.raw.clone(),
-        })
+        crate::utils::build_accuracy_result("Morse Code", b)
     }
 }
 
@@ -332,7 +290,7 @@ impl Benchmark for MorseCodeToolsBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         load_config(
-            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            &mut self.state.lock().unwrap_or_else(|p| p.into_inner()),
             config,
         );
         Ok(())
@@ -345,7 +303,7 @@ impl Benchmark for MorseCodeToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -496,5 +454,34 @@ impl Benchmark for MorseCodeToolsBenchmark {
             }],
             raw: b.raw.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_to_morse_encodes() {
+        assert_eq!(text_to_morse("HELLO"), ".... . .-.. .-.. ---");
+        assert_eq!(text_to_morse("SOS"), "... --- ...");
+    }
+
+    #[test]
+    fn morse_to_text_decodes_round_trip() {
+        assert_eq!(morse_to_text(".... . .-.. .-.. ---"), "HELLO");
+        assert_eq!(morse_to_text("... --- ..."), "SOS");
+    }
+
+    #[test]
+    fn morse_round_trip_mixed_case() {
+        let encoded = text_to_morse("Hello World");
+        assert_eq!(morse_to_text(&encoded), "HELLO WORLD");
+    }
+
+    #[test]
+    fn morse_unknown_char_falls_back_to_q() {
+        // Characters not in the table map to '?'.
+        assert_eq!(text_to_morse("hi#"), ".... .. ?");
     }
 }

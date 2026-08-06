@@ -4,17 +4,18 @@ use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 
 pub struct TruthfulQABenchmark {
     state: Mutex<TruthfulQAMC1State>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct TruthfulQAMC1State {
     items: Vec<MC1Item>,
     current_idx: usize,
@@ -35,6 +36,7 @@ pub struct TruthfulQAMC2Benchmark {
     state: Mutex<TruthfulQAMC2State>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct TruthfulQAMC2State {
     items: Vec<MC2Item>,
     current_idx: usize,
@@ -63,7 +65,7 @@ struct MultipleChoiceData {
     pub mc2: Vec<MC2Item>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct MC1Item {
     pub question: String,
     #[serde(rename = "best_answer")]
@@ -74,7 +76,7 @@ struct MC1Item {
     incorrect_answers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct MC2Item {
     pub question: String,
     pub answers: Vec<String>,
@@ -84,10 +86,11 @@ struct MC2Item {
 
 /// Extract a single answer letter from a model response using regex patterns.
 /// Returns the first letter found in patterns: "The answer is (X)" → "Answer: X" → last isolated A-Z.
-static RE_ANSWER_IS: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)answer\s+(?:is)?\s*[:\s\(]?\s*([A-Z])").unwrap());
-static RE_ANSWER_COLON: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\banswer:\s*([A-Z])").unwrap());
-static RE_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-Z])\b").unwrap());
+static RE_ANSWER_IS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)answer\s+(?:is)?\s*[:\s\(]?\s*([A-Z])").unwrap());
+static RE_ANSWER_COLON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\banswer:\s*([A-Z])").unwrap());
+static RE_LETTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Z])\b").unwrap());
 
 fn extract_answer(text: &str) -> Option<char> {
     // Pattern 1: "The answer is (X)" or "The answer is X"
@@ -228,7 +231,7 @@ impl Benchmark for TruthfulQABenchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let dataset = load_truthfulqa()?;
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = dataset.multiple_choice.mc1;
         state.current_idx = 0;
         Ok(())
@@ -241,7 +244,7 @@ impl Benchmark for TruthfulQABenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -433,7 +436,7 @@ impl Benchmark for TruthfulQAMC2Benchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let dataset = load_truthfulqa()?;
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = dataset.multiple_choice.mc2;
         state.current_idx = 0;
         Ok(())
@@ -446,7 +449,7 @@ impl Benchmark for TruthfulQAMC2Benchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

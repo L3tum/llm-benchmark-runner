@@ -19,6 +19,7 @@ pub struct SvgBikeBenchmark {
     state: Mutex<SvgState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SvgState {
     done: bool,
     output_dir: PathBuf,
@@ -79,7 +80,7 @@ impl Benchmark for SvgMoonwalkBenchmark {
         let output_dir =
             config::extract_string(config, "output_dir").unwrap_or_else(|| "output".to_string());
         {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.output_dir = PathBuf::from(output_dir);
             fs::create_dir_all(&state.output_dir)?;
         }
@@ -93,7 +94,7 @@ impl Benchmark for SvgMoonwalkBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let should_execute = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.done {
                 return Ok(None);
             }
@@ -230,7 +231,7 @@ impl Benchmark for SvgBikeBenchmark {
         let output_dir =
             config::extract_string(config, "output_dir").unwrap_or_else(|| "output".to_string());
         {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.output_dir = PathBuf::from(output_dir);
             fs::create_dir_all(&state.output_dir)?;
         }
@@ -244,7 +245,7 @@ impl Benchmark for SvgBikeBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let should_execute = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.done {
                 return Ok(None);
             }

@@ -13,6 +13,7 @@ pub struct MmluProxBenchmark {
     state: Mutex<MmluProXState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct MmluProXState {
     items: Vec<MmluProXItem>,
     current_idx: usize,
@@ -146,7 +147,7 @@ impl Benchmark for MmluProxBenchmark {
             languages.len(),
             languages.join(", ")
         );
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -159,7 +160,7 @@ impl Benchmark for MmluProxBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

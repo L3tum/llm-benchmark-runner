@@ -24,13 +24,24 @@ fn stop_model_and_exit() {
         drop(pid_lock); // Release the lock before sending signals
 
         // Send SIGTERM first, wait a second, then SIGKILL if still alive
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            // Force kill the process group (in case it spawned children)
+            let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGKILL);
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        // Force kill the process group (in case it spawned children)
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        #[cfg(not(unix))]
+        {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
         }
     }
     // Exit the main process (guards will already be dropped if they're in scope,
@@ -40,6 +51,140 @@ fn stop_model_and_exit() {
 
 const DEFAULT_CONFIG: &str = "models_config.yaml";
 const RESULTS_FILE: &str = "benchmark_results/results.json";
+
+/// Per-model benchmark state recovered from a previously-saved results file,
+/// used to resume an interrupted run.
+struct ResumeState {
+    completed_benchmarks_per_model: HashMap<String, Vec<String>>,
+    failed_benchmarks_per_model: HashMap<String, Vec<String>>,
+    all_models_results: HashMap<String, HashMap<String, BenchmarkResult>>,
+}
+
+impl ResumeState {
+    fn empty() -> Self {
+        Self {
+            completed_benchmarks_per_model: HashMap::new(),
+            failed_benchmarks_per_model: HashMap::new(),
+            all_models_results: HashMap::new(),
+        }
+    }
+}
+
+/// Parse a previously-saved results JSON into per-model completed/failed lists and
+/// full results, enabling resume of interrupted runs. Returns a `ResumeState`.
+fn load_resume_state(existing_results: Option<&serde_json::Value>) -> ResumeState {
+    let mut state = ResumeState::empty();
+
+    if let Some(existing) = existing_results {
+        if let Some(models) = existing.get("models").and_then(|v| v.as_object()) {
+            for (name, data) in models {
+                if let Some(completed) = data.get("benchmarks_completed").and_then(|v| v.as_array())
+                {
+                    state.completed_benchmarks_per_model.insert(
+                        name.clone(),
+                        completed
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect(),
+                    );
+                }
+                if let Some(failed) = data.get("benchmarks_failed").and_then(|v| v.as_array()) {
+                    state.failed_benchmarks_per_model.insert(
+                        name.clone(),
+                        failed
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect(),
+                    );
+                }
+                // Deserialize the BenchmarkResult objects from the saved JSON.
+                let mut per_model_benchmarks: HashMap<String, BenchmarkResult> = HashMap::new();
+                if let Some(benchmark_data) = data.get("benchmarks").and_then(|v| v.as_object()) {
+                    for (bench_name, bench_result) in benchmark_data {
+                        if let Ok(result) =
+                            serde_json::from_value::<BenchmarkResult>(bench_result.clone())
+                        {
+                            per_model_benchmarks.insert(bench_name.clone(), result);
+                        }
+                    }
+                }
+                state
+                    .all_models_results
+                    .insert(name.clone(), per_model_benchmarks);
+            }
+        }
+    }
+
+    state
+}
+
+/// Running-sum timing accumulator used for O(1) ETA estimation across the model
+/// loop. Avoids rebuilding/scanning timing vectors each model iteration.
+struct TimingAccumulator {
+    global_sum: std::time::Duration,
+    global_count: usize,
+    bench_sum: HashMap<String, std::time::Duration>,
+    bench_count: HashMap<String, usize>,
+}
+
+impl TimingAccumulator {
+    fn new() -> Self {
+        Self {
+            global_sum: std::time::Duration::from_secs(0),
+            global_count: 0,
+            bench_sum: HashMap::new(),
+            bench_count: HashMap::new(),
+        }
+    }
+
+    fn merge(&mut self, per_bench_timings: HashMap<String, Vec<std::time::Duration>>) {
+        for (bench_name, timings) in per_bench_timings {
+            let s = self.bench_sum.entry(bench_name.clone()).or_default();
+            for t in &timings {
+                *s += *t;
+            }
+            *self.bench_count.entry(bench_name).or_default() += timings.len();
+            self.global_sum += timings.iter().cloned().sum::<std::time::Duration>();
+            self.global_count += timings.len();
+        }
+    }
+
+    /// Estimate the total remaining runtime for future models/benchmarks, using
+    /// the per-benchmark average where known, else the global overall average.
+    fn estimate_remaining(
+        &self,
+        model_idx: usize,
+        models: &[config::Model],
+        benchmarks: &[String],
+        completed_benchmarks_per_model: &HashMap<String, Vec<String>>,
+    ) -> std::time::Duration {
+        let overall_avg = if self.global_count == 0 {
+            std::time::Duration::from_secs(0)
+        } else {
+            self.global_sum.div_f64(self.global_count as f64)
+        };
+        if model_idx + 1 >= models.len() {
+            return std::time::Duration::from_secs(0);
+        }
+        let mut remaining_est: std::time::Duration = std::time::Duration::from_secs(0);
+        for future_model in &models[model_idx + 1..] {
+            let future_completed = completed_benchmarks_per_model
+                .get(&future_model.display_name)
+                .cloned()
+                .unwrap_or_default();
+            for bench in benchmarks {
+                if !future_completed.contains(bench) {
+                    let bench_avg = self.bench_sum.get(bench).map(|s| {
+                        let n = *self.bench_count.get(bench).unwrap_or(&0);
+                        s.div_f64(n as f64)
+                    });
+                    remaining_est += bench_avg.unwrap_or(overall_avg);
+                }
+            }
+        }
+        remaining_est
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "llm-benchmark-runner")]
@@ -107,6 +252,13 @@ fn main() -> Result<()> {
 fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     println!("Loading config: {}", config_path);
     let config = config::load_config(config_path)?;
+    if config.docker.mount_docker_socket {
+        eprintln!(
+            "⚠️  WARNING: mount_docker_socket is enabled — benchmark containers can access \
+             the host Docker socket, granting full host root access on escape. Only use in \
+             trusted environments."
+        );
+    }
     if config.models.is_empty() {
         return Err(anyhow::anyhow!("No models defined"));
     }
@@ -121,47 +273,20 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     } else {
         None
     };
-    // Build completed and failed benchmark tracking per model
-    let mut completed_benchmarks_per_model: HashMap<String, Vec<String>> = HashMap::new();
-    let mut failed_benchmarks_per_model: HashMap<String, Vec<String>> = HashMap::new();
-    let mut all_models_results: HashMap<String, HashMap<String, BenchmarkResult>> = HashMap::new();
+    // Build completed and failed benchmark tracking per model from any saved run
+    let s = load_resume_state(existing_results.as_ref());
+    let (
+        mut completed_benchmarks_per_model,
+        mut failed_benchmarks_per_model,
+        mut all_models_results,
+    ) = (
+        s.completed_benchmarks_per_model,
+        s.failed_benchmarks_per_model,
+        s.all_models_results,
+    );
 
-    // Global timing map: benchmark name -> durations (across all models)
-    let mut global_timings: HashMap<String, Vec<std::time::Duration>> = HashMap::new();
-
-    if let Some(ref existing) = existing_results {
-        if let Some(models) = existing.get("models").and_then(|v| v.as_object()) {
-            for (name, data) in models {
-                if let Some(completed) = data.get("benchmarks_completed").and_then(|v| v.as_array())
-                {
-                    let bench_names: Vec<String> = completed
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    completed_benchmarks_per_model.insert(name.clone(), bench_names);
-                }
-                if let Some(failed) = data.get("benchmarks_failed").and_then(|v| v.as_array()) {
-                    let bench_names: Vec<String> = failed
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    failed_benchmarks_per_model.insert(name.clone(), bench_names);
-                }
-                // Deserialize the BenchmarkResult objects from the saved JSON
-                let mut per_model_benchmarks: HashMap<String, BenchmarkResult> = HashMap::new();
-                if let Some(benchmark_data) = data.get("benchmarks").and_then(|v| v.as_object()) {
-                    for (bench_name, bench_result) in benchmark_data {
-                        if let Ok(result) =
-                            serde_json::from_value::<BenchmarkResult>(bench_result.clone())
-                        {
-                            per_model_benchmarks.insert(bench_name.clone(), result);
-                        }
-                    }
-                }
-                all_models_results.insert(name.clone(), per_model_benchmarks);
-            }
-        }
-    }
+    // Running-sum accumulator for O(1) ETA each model iteration.
+    let mut timings = TimingAccumulator::new();
 
     println!("Benchmarks: {}", benchmarks.join(", "));
 
@@ -216,43 +341,16 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             &config.docker,
             &model_completed_benchmarks,
         )?;
-        // Merge per-model timings into global map
-        for (bench_name, timings) in per_bench_timings {
-            global_timings
-                .entry(bench_name)
-                .or_default()
-                .extend(timings);
-        }
+        // Merge per-model timings into running-sum accumulator.
+        timings.merge(per_bench_timings);
 
-        // Compute ETA: sum of estimated times for all remaining (model, benchmark) pairs
-        // using global average per benchmark (or global overall average)
-        let mut remaining_est: std::time::Duration = std::time::Duration::from_secs(0);
-        let all_durations: Vec<std::time::Duration> =
-            global_timings.values().flatten().cloned().collect();
-        let overall_avg = if all_durations.is_empty() {
-            std::time::Duration::from_secs(0)
-        } else {
-            let sum: std::time::Duration = all_durations.iter().cloned().sum();
-            sum.div_f64(all_durations.len() as f64)
-        };
-
-        // Count remaining (model, benchmark) pairs for future models
-        for future_model in &config.models[model_idx + 1..] {
-            let future_completed = completed_benchmarks_per_model
-                .get(&future_model.display_name)
-                .cloned()
-                .unwrap_or_default();
-            for bench in &benchmarks {
-                if !future_completed.contains(bench) {
-                    let bench_avg = global_timings.get(bench).map(|v| {
-                        let sum: std::time::Duration = v.iter().cloned().sum();
-                        sum.div_f64(v.len() as f64)
-                    });
-                    let est = bench_avg.unwrap_or(overall_avg);
-                    remaining_est += est;
-                }
-            }
-        }
+        // Compute ETA: sum of estimated times for all remaining (model, benchmark) pairs.
+        let remaining_est = timings.estimate_remaining(
+            model_idx,
+            &config.models,
+            &benchmarks,
+            &completed_benchmarks_per_model,
+        );
         let eta_str = if remaining_est.is_zero() {
             "–".to_string()
         } else {
@@ -289,11 +387,37 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
     let runtime_str = utils::format_duration(total_runtime);
     println!("\nTotal runtime: {}", runtime_str);
 
-    // Post-execute for each benchmark
+    // Post-execute for each benchmark (collects KLD pairwise + post results).
+    let (kld_pairwise, post_execute_results) = run_post_execute(&benchmarks, &all_models_results);
+
+    // Save final results JSON (with both models and kld_pairwise).
+    let output_dir = Path::new("benchmark_results");
+    save_final_results(&all_models_results, &kld_pairwise)?;
+
+    // Generate reports from in-memory results, passing per-benchmark, per-model BenchmarkResult objects
+    report::generate_reports(
+        &all_models_results,
+        output_dir,
+        &config.comparisons,
+        &post_execute_results,
+    )?;
+    println!("\nBenchmark complete.");
+    Ok(())
+}
+
+/// Run the post-execution phase for every benchmark, aggregating per-model results.
+/// Returns the KLD pairwise map and the post-execute results.
+fn run_post_execute(
+    benchmarks: &[String],
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+) -> (
+    serde_json::Map<String, serde_json::Value>,
+    HashMap<String, BenchmarkResult>,
+) {
     println!("\nPost-execution phase:");
     let mut kld_pairwise: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     let mut post_execute_results: HashMap<String, BenchmarkResult> = HashMap::new();
-    for bench_name in &benchmarks {
+    for bench_name in benchmarks {
         // Collect results from all models for this benchmark
         let model_results: HashMap<String, BenchmarkResult> = all_models_results
             .iter()
@@ -331,15 +455,19 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             }
         }
     }
+    (kld_pairwise, post_execute_results)
+}
 
-    // Save final results JSON (with both models and kld_pairwise)
-    // and pass the in-memory results to report generation
-    let output_dir = Path::new("benchmark_results");
-    fs::create_dir_all(output_dir)?;
+/// Write the final results JSON (models + kld_pairwise) atomically to RESULTS_FILE.
+fn save_final_results(
+    all_models_results: &HashMap<String, HashMap<String, BenchmarkResult>>,
+    kld_pairwise: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    fs::create_dir_all(Path::new("benchmark_results"))?;
 
     // Build the final JSON for saving: models with all benchmark results + kld_pairwise
     let mut models_json = serde_json::Map::new();
-    for (model_name, bench_results) in &all_models_results {
+    for (model_name, bench_results) in all_models_results {
         let mut model_data = serde_json::Map::new();
         let mut bench_json = serde_json::Map::new();
         for (bench_name, result) in bench_results {
@@ -358,20 +486,10 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
         "models": models_json,
         "kld_pairwise": kld_pairwise,
     });
-    // Write to file using the same save_results signature (we need to adapt save_results first)
     let tmp_path = format!("{}.tmp", RESULTS_FILE);
     let json = serde_json::to_string_pretty(&final_results)?;
     fs::write(&tmp_path, json)?;
     fs::rename(&tmp_path, RESULTS_FILE)?;
-
-    // Generate reports from in-memory results, passing per-benchmark, per-model BenchmarkResult objects
-    report::generate_reports(
-        &all_models_results,
-        output_dir,
-        &config.comparisons,
-        &post_execute_results,
-    )?;
-    println!("\nBenchmark complete.");
     Ok(())
 }
 
@@ -653,7 +771,7 @@ fn generate_comparison_reports(
         let filename = if slug.is_empty() {
             format!("comparison-{}.html", idx)
         } else {
-            format!("{}.html", slug)
+            format!("comparison-{}.html", slug)
         };
 
         report::generate_comparison_report(
@@ -666,4 +784,84 @@ fn generate_comparison_reports(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_resume_state_parses_saved_results() {
+        let json = serde_json::json!({
+            "models": {
+                "MyModel Q4": {
+                    "status": "completed",
+                    "benchmarks_completed": ["mmlu_pro"],
+                    "benchmarks": {
+                        "mmlu_pro": {
+                            "scores": {},
+                            "breakdowns": {},
+                            "error_classification": {},
+                            "artifacts": [],
+                            "diagnostics": [],
+                            "raw": {}
+                        }
+                    }
+                }
+            }
+        });
+        let st = load_resume_state(Some(&json));
+        assert_eq!(
+            st.completed_benchmarks_per_model.get("MyModel Q4").unwrap(),
+            &vec!["mmlu_pro".to_string()]
+        );
+        assert!(st.failed_benchmarks_per_model.is_empty());
+        let model = st.all_models_results.get("MyModel Q4").unwrap();
+        assert!(model.contains_key("mmlu_pro"));
+    }
+
+    #[test]
+    fn load_resume_state_none_is_empty() {
+        let st = load_resume_state(None);
+        assert!(st.completed_benchmarks_per_model.is_empty());
+        assert!(st.failed_benchmarks_per_model.is_empty());
+        assert!(st.all_models_results.is_empty());
+    }
+
+    #[test]
+    fn timing_accumulator_advances_and_estimates() {
+        let mut t = TimingAccumulator::new();
+        let mut per_bench = HashMap::new();
+        per_bench.insert(
+            "mmlu_pro".to_string(),
+            vec![
+                std::time::Duration::from_secs(4),
+                std::time::Duration::from_secs(6),
+            ],
+        );
+        t.merge(per_bench);
+
+        // No future models → remaining estimate is zero.
+        assert_eq!(
+            t.estimate_remaining(0, &[], &["mmlu_pro".to_string()], &HashMap::new()),
+            std::time::Duration::from_secs(0)
+        );
+
+        // One future model that still needs "mmlu_pro" → estimated via bench avg (5s).
+        let completed = HashMap::new();
+        let make_model = |name: &str| config::Model {
+            model_name: name.into(),
+            display_name: name.into(),
+            cmd: "".into(),
+            proxy: "".into(),
+            cmd_stop: None,
+            set_params: None,
+            rate_limit_ms: None,
+        };
+        let models = vec![make_model("M1"), make_model("M2")];
+        // model_idx=0 with 2 models → one future model remains.
+        let est = t.estimate_remaining(0, &models, &["mmlu_pro".to_string()], &completed);
+        // Average of 4s and 6s = 5s.
+        assert_eq!(est, std::time::Duration::from_secs(5));
+    }
 }

@@ -13,6 +13,7 @@ pub struct IFEvalBenchmark {
     state: Mutex<IFEvalState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct IFEvalState {
     items: Vec<IFEvalRow>,
     current_idx: usize,
@@ -32,7 +33,7 @@ impl Default for IFEvalBenchmark {
 const IFEVAL_URL: &str =
     "https://huggingface.co/datasets/google/IFEval/resolve/main/ifeval_input_data.jsonl";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct IFEvalRow {
     prompt: String,
     #[serde(rename = "instruction_id_list")]
@@ -234,7 +235,7 @@ impl Benchmark for IFEvalBenchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let dataset = load_ifeval_dataset()?;
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = dataset;
         state.current_idx = 0;
         Ok(())
@@ -247,7 +248,7 @@ impl Benchmark for IFEvalBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (row, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

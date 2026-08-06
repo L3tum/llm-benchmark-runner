@@ -81,6 +81,12 @@ pub struct Client {
     /// Accumulated conversation history for multi-turn tool-use sessions.
     /// Each entry is a message JSON object (role + content + optional tool_calls).
     history: Vec<serde_json::Value>,
+    /// Timestamp of the last successful health check, used to avoid redundant
+    /// per-benchmark health-check roundtrips (see runner::wait_for_health).
+    last_healthy: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Minimum interval between requests (rate limiting), and the time of the
+    /// last request. Set via `set_rate_limit` from the model config.
+    rate_limit: std::sync::Mutex<(std::time::Duration, Option<std::time::Instant>)>,
 }
 
 fn rough_token_count(text: &str) -> u64 {
@@ -125,6 +131,29 @@ fn token_usage_from_response(
 
     (output_tokens, thinking_tokens)
 }
+fn is_local_host(host: Option<&str>) -> bool {
+    matches!(
+        host,
+        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("0.0.0.0")
+    )
+}
+
+/// Shared, pooled HTTP client. A single `reqwest::blocking::Client` reuses
+/// connections and TLS sessions across all models/benchmarks instead of building
+/// a fresh client (and connection pool) on every construction.
+fn pooled_http_client() -> reqwest::blocking::Client {
+    static POOL: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("failed to build pooled HTTP client")
+    })
+    .clone()
+}
+
 impl Client {
     /// Create a client with optional model-level parameters.
     pub fn new_with_model_params(
@@ -132,9 +161,15 @@ impl Client {
         model_params: Option<&HashMap<String, serde_json::Value>>,
     ) -> Result<Self> {
         let base_url = reqwest::Url::parse(base_url)?;
-        let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        // Warn when a non-local proxy URL uses plaintext HTTP (no TLS), since
+        // prompts and model outputs are sensitive.
+        if base_url.scheme() == "http" && !is_local_host(base_url.host_str()) {
+            eprintln!(
+                "⚠️  WARNING: proxy URL uses unencrypted HTTP: {}. Use HTTPS in production.",
+                base_url
+            );
+        }
+        let http = pooled_http_client();
         let model_params = model_params.map(|m| {
             m.iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -145,7 +180,56 @@ impl Client {
             http,
             model_params,
             history: Vec::new(),
+            last_healthy: std::sync::Mutex::new(None),
+            rate_limit: std::sync::Mutex::new((std::time::Duration::ZERO, None)),
         })
+    }
+
+    /// Set a minimum interval between requests (`0` disables throttling).
+    pub fn set_rate_limit(&self, min_interval_ms: u64) {
+        if let Ok(mut guard) = self.rate_limit.lock() {
+            guard.0 = std::time::Duration::from_millis(min_interval_ms);
+        }
+    }
+
+    /// Sleep if needed to respect the configured minimum request interval.
+    pub fn throttle(&self) {
+        let (interval, last) = {
+            let Ok(guard) = self.rate_limit.lock() else {
+                return;
+            };
+            *guard
+        };
+        if interval.is_zero() {
+            return;
+        }
+        if let Some(last) = last {
+            let elapsed = last.elapsed();
+            if elapsed < interval {
+                std::thread::sleep(interval - elapsed);
+            }
+        }
+        if let Ok(mut guard) = self.rate_limit.lock() {
+            guard.1 = Some(std::time::Instant::now());
+        }
+    }
+
+    /// True if a health check succeeded within `ttl` (avoids redundant roundtrips).
+    pub fn recently_healthy(&self, ttl: std::time::Duration) -> bool {
+        match self.last_healthy.lock() {
+            Ok(guard) => match *guard {
+                Some(t) => t.elapsed() < ttl,
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Record that a health check just succeeded.
+    pub fn mark_healthy(&self) {
+        if let Ok(mut guard) = self.last_healthy.lock() {
+            *guard = Some(std::time::Instant::now());
+        }
     }
 
     /// Create a client without model-level parameters (thin wrapper).
@@ -167,6 +251,7 @@ impl Client {
         system: &str,
         user: &str,
     ) -> Result<(String, Option<u64>, Option<u64>)> {
+        self.throttle();
         let url = self.base_url.join("chat/completions")?;
         let mut req = serde_json::json!({
             "model": model_name,
@@ -215,6 +300,7 @@ impl Client {
         system: &str,
         user: &str,
     ) -> Result<(Vec<LogprobEntry>, Option<u64>, Option<u64>)> {
+        self.throttle();
         let url = self.base_url.join("chat/completions")?;
         let mut req = serde_json::json!({
             "model": model_name,
@@ -274,6 +360,7 @@ impl Client {
         model_params: Option<&HashMap<String, serde_json::Value>>,
         use_history: bool,
     ) -> Result<(String, Vec<ToolCall>, Option<u64>, Option<u64>)> {
+        self.throttle();
         // If history is disabled, clear any accumulated state
         if !use_history {
             self.history.clear();
@@ -492,5 +579,40 @@ mod tests {
         let (out, think) = token_usage_from_response(&r, &msg());
         assert_eq!(out, None);
         assert_eq!(think, None);
+    }
+
+    fn bare_client() -> Client {
+        Client::new("http://localhost:9999").unwrap()
+    }
+
+    #[test]
+    fn health_cache_starts_cold_then_marks_healthy() {
+        let c = bare_client();
+        assert!(!c.recently_healthy(std::time::Duration::from_secs(30)));
+        c.mark_healthy();
+        assert!(c.recently_healthy(std::time::Duration::from_secs(30)));
+        // Expired TTL -> no longer "recently healthy".
+        assert!(!c.recently_healthy(std::time::Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn rate_limit_zero_disabled_by_default() {
+        let c = bare_client();
+        // With no limit configured, throttle() must not sleep and must not error.
+        let t = std::time::Instant::now();
+        c.throttle();
+        assert!(t.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn rate_limit_throttles_when_under_interval() {
+        let c = bare_client();
+        c.set_rate_limit(80);
+        // First call records a timestamp; subsequent immediate call must sleep ~40ms
+        // when the interval (80ms) minus elapsed is applied.
+        c.throttle();
+        let t = std::time::Instant::now();
+        c.throttle();
+        assert!(t.elapsed() >= std::time::Duration::from_millis(40));
     }
 }

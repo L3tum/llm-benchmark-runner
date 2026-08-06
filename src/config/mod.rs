@@ -41,6 +41,10 @@ pub struct DockerConfig {
     pub max_workers: usize,
     #[serde(default = "default_docker_socket_path")]
     pub docker_socket_path: String,
+    /// ⚠️ SECURITY WARNING: When `true`, the host Docker socket is mounted into
+    /// benchmark containers. A container escape then grants **full host root
+    /// access**. Only enable this in trusted environments (e.g. local dev where
+    /// you own the host). Defaults to `false`.
     #[serde(default = "default_false")]
     pub mount_docker_socket: bool,
 }
@@ -103,6 +107,10 @@ pub struct Model {
     /// These override any benchmark-level parameters.
     #[serde(default)]
     pub set_params: Option<HashMap<String, serde_json::Value>>,
+    /// Optional minimum interval (ms) between API requests to this model.
+    /// Throttles request rate to avoid provider rate limits (0/None = no limit).
+    #[serde(default)]
+    pub rate_limit_ms: Option<u64>,
 }
 
 pub fn load_config(path: &str) -> Result<Config> {
@@ -199,9 +207,10 @@ pub fn extract_string_vec(config: &yaml_serde::Value, key: &str) -> Option<Vec<S
 pub fn extract_bool(config: &yaml_serde::Value, key: &str) -> Option<bool> {
     if let yaml_serde::Value::Mapping(map) = config {
         if let Some(val) = map.get(yaml_serde::Value::String(key.to_string())) {
-            // yaml_serde may represent booleans as strings
+            // yaml_serde may represent booleans as strings (case-insensitive)
             if let yaml_serde::Value::String(s) = val {
-                return Some(s == "true" || s == "yes");
+                let lower = s.trim().to_lowercase();
+                return Some(matches!(lower.as_str(), "true" | "yes" | "1" | "on"));
             }
             // Try number
             if let Some(n) = val.as_f64() {
@@ -285,6 +294,28 @@ mod tests {
     fn extract_bool_from_number() {
         let cfg = make_config(vec![("n", serde_json::json!(1))]);
         assert_eq!(extract_bool(&cfg, "n"), Some(true));
+    }
+
+    #[test]
+    fn extract_bool_case_insensitive() {
+        for s in ["True", "TRUE", "Yes", "YES", "1", "On"] {
+            let cfg = make_config(vec![("on", serde_json::json!(s))]);
+            assert_eq!(
+                extract_bool(&cfg, "on"),
+                Some(true),
+                "expected true for {:?}",
+                s
+            );
+        }
+        for s in ["False", "FALSE", "No", "NO", "0", "Off"] {
+            let cfg = make_config(vec![("off", serde_json::json!(s))]);
+            assert_eq!(
+                extract_bool(&cfg, "off"),
+                Some(false),
+                "expected false for {:?}",
+                s
+            );
+        }
     }
 
     #[test]

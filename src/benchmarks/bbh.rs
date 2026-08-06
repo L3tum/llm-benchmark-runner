@@ -14,6 +14,7 @@ pub struct BbhBenchmark {
     state: Mutex<BbhState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct BbhState {
     tasks: Vec<BbhTask>,
     current_idx: usize,
@@ -246,7 +247,7 @@ impl Benchmark for BbhBenchmark {
             tasks.len(),
             selected_tasks.len()
         );
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.tasks = tasks;
         state.current_idx = 0;
         Ok(())
@@ -259,7 +260,7 @@ impl Benchmark for BbhBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (task, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.tasks.len() {
                 return Ok(None);
             }

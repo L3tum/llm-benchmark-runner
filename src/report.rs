@@ -172,7 +172,9 @@ fn generate_summary_from_tests(tests: &BTreeMap<TestName, TestReportData>) -> Ve
 
         if let Some((model, _, score_name, score_value, _)) = best {
             let formatted_score = match score_value {
-                ScoreValue::Float(f) => format!("{:.1}%", f * 100.0),
+                // Percent-unit scores are already stored as 0-100 (e.g. pass_rate,
+                // accuracy computed as count/total*100.0). Do NOT multiply again.
+                ScoreValue::Float(f) => format!("{:.1}%", f),
                 ScoreValue::Integer(i) => format!("{}", i),
                 ScoreValue::Bool(b) => (if b { "✓" } else { "✗" }).to_string(),
                 ScoreValue::Text(t) => t.to_string(),
@@ -325,42 +327,10 @@ fn filter_post_execute_results(
         .iter()
         .map(|(bench_name, result)| {
             // For benchmarks like KLD that have a breakdown table with pairwise scores,
-            // we need to filter the breakdown rows to only include pairs from the comparison.
+            // filter the breakdown rows to only include pairs from the comparison.
+            // The KLD-specific logic lives in benchmarks/kld.rs (keeps this filter generic).
             let filtered_result = if bench_name == "kld" {
-                let mut filtered = result.clone();
-                if let Some(breakdown) = filtered.breakdowns.get_mut("pairwise_kld") {
-                    // Filter pairwise rows to only include pairs where both models are in the comparison
-                    let filtered_rows = breakdown
-                        .rows
-                        .iter()
-                        .filter(|(key, _)| {
-                            if let Some((a, b)) = key.split_once('_') {
-                                model_names.contains(a) && model_names.contains(b)
-                            } else {
-                                false
-                            }
-                        })
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    breakdown.rows = filtered_rows;
-                    // Also filter avg_kld_to_others from the raw field
-                    if let Some(raw_obj) = result.raw.as_object() {
-                        let filtered_avg = raw_obj
-                            .get("avg_kld_to_others")
-                            .and_then(|v| v.as_object())
-                            .map(|avg| {
-                                avg.iter()
-                                    .filter(|(name, _)| model_names.contains(name.as_str()))
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect::<serde_json::Map<_, _>>()
-                            });
-                        if let Some(filtered_avg) = filtered_avg {
-                            filtered.raw["avg_kld_to_others"] =
-                                serde_json::Value::Object(filtered_avg);
-                        }
-                    }
-                }
-                filtered
+                crate::benchmarks::kld::filter_kld_by_models(result, &model_names)
             } else {
                 result.clone()
             };

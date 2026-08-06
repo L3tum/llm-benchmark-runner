@@ -12,6 +12,7 @@ pub struct MinebenchBenchmark {
     state: Mutex<MinebenchState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct MinebenchState {
     buildings: Vec<(String, String)>, // (key, build description)
     current_idx: usize,
@@ -278,7 +279,7 @@ impl Benchmark for MinebenchBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let buildings = configured_buildings(config)?;
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.buildings = buildings;
         state.current_idx = 0;
         Ok(())
@@ -291,7 +292,7 @@ impl Benchmark for MinebenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, building_key, build) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.buildings.len() {
                 return Ok(None);
             }
@@ -556,7 +557,7 @@ impl Benchmark for MinebenchToolsBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         let buildings = configured_buildings(config)?;
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.buildings = buildings;
         state.current_idx = 0;
         Ok(())
@@ -569,7 +570,7 @@ impl Benchmark for MinebenchToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, building_key, build) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.buildings.len() {
                 return Ok(None);
             }

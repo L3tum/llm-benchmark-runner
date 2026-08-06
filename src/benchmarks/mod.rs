@@ -4,6 +4,20 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
+/// Register benchmark types into the registry map. Each entry defaults the
+/// benchmark type; use a plain `map.insert(...)` for types with a custom
+/// constructor (e.g. `TerminalBenchBenchmark::new()`).
+macro_rules! bm {
+    ($map:expr, $( $name:literal => $ty:ty ),* $(,)?) => {
+        $(
+            $map.insert(
+                $name.to_string(),
+                Box::new(<$ty>::default()) as Box<dyn Benchmark>,
+            );
+        )*
+    };
+}
+
 // Re-export shared translation benchmark types from shared module.
 pub use crate::shared::{Difficulty, TranslationState};
 
@@ -134,247 +148,69 @@ fn registry() -> &'static BTreeMap<String, Box<dyn Benchmark>> {
     static REGISTRY: OnceLock<BTreeMap<String, Box<dyn Benchmark>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         let mut map = BTreeMap::new();
-        map.insert(
-            "mmlu_pro".to_string(),
-            Box::new(mmlu_pro::MmluProBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "supergpqa".to_string(),
-            Box::new(supergpqa::SuperGpqaBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "kld".to_string(),
-            Box::new(kld::KldBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "gpqa".to_string(),
-            Box::new(gpqa::GpqaBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "aime".to_string(),
-            Box::new(aime::AimeBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "apps".to_string(),
-            Box::new(apps::AppsBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "math500".to_string(),
-            Box::new(math500::Math500Benchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "minebench".to_string(),
-            Box::new(minebench::MinebenchBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "carwash".to_string(),
-            Box::new(carwash::CarwashBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "fictional_language".to_string(),
-            Box::new(fictional_language::FictionalLanguageBenchmark::default())
-                as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "efficient_language".to_string(),
-            Box::new(efficient_language::EfficientLanguageBenchmark::default())
-                as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "reverse".to_string(),
-            Box::new(reverse::ReverseBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "reverse_tools".to_string(),
-            Box::new(reverse::ReverseToolsBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "morse_code".to_string(),
-            Box::new(morse_code::MorseCodeBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "morse_code_tools".to_string(),
-            Box::new(morse_code::MorseCodeToolsBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "base64".to_string(),
-            Box::new(base64::Base64Benchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "base64_tools".to_string(),
-            Box::new(base64::Base64ToolsBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "hex".to_string(),
-            Box::new(hex::HexBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "hex_tools".to_string(),
-            Box::new(hex::HexToolsBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "svg_moonwalk".to_string(),
-            Box::new(svg_benchmarks::SvgMoonwalkBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "svg_bike".to_string(),
-            Box::new(svg_benchmarks::SvgBikeBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "minebench_tools".to_string(),
-            Box::new(minebench::MinebenchToolsBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "ifeval".to_string(),
-            Box::new(ifeval::IFEvalBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "harmbench".to_string(),
-            Box::new(harmbench::HarmBenchBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "coding_eval".to_string(),
-            Box::new(coding_eval::CodingEvalBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "humaneval".to_string(),
-            Box::new(coding_eval::HumanEvalBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "humaneval_plus".to_string(),
-            Box::new(coding_eval::HumanEvalPlusBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "mbpp_plus".to_string(),
-            Box::new(coding_eval::MbppPlusBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "multipl_e".to_string(),
-            Box::new(multipl_e::MultiPLEBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "swebench".to_string(),
-            Box::new(swe_bench::SweBenchBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "swebench_verified".to_string(),
-            Box::new(swe_bench::SweBenchVerifiedBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "swebench_pro".to_string(),
-            Box::new(swe_bench::SweBenchProBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "swebench_multilingual".to_string(),
-            Box::new(swe_bench::SweBenchMultilingualBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "tool_hallucination".to_string(),
-            Box::new(tool_hallucination::ToolHallucinationBenchmark::default())
-                as Box<dyn Benchmark>,
-        );
+        bm!(map, "mmlu_pro" => mmlu_pro::MmluProBenchmark);
+        bm!(map, "supergpqa" => supergpqa::SuperGpqaBenchmark);
+        bm!(map, "kld" => kld::KldBenchmark);
+        bm!(map, "gpqa" => gpqa::GpqaBenchmark);
+        bm!(map, "aime" => aime::AimeBenchmark);
+        bm!(map, "apps" => apps::AppsBenchmark);
+        bm!(map, "math500" => math500::Math500Benchmark);
+        bm!(map, "minebench" => minebench::MinebenchBenchmark);
+        bm!(map, "carwash" => carwash::CarwashBenchmark);
+        bm!(map, "fictional_language" => fictional_language::FictionalLanguageBenchmark);
+        bm!(map, "efficient_language" => efficient_language::EfficientLanguageBenchmark);
+        bm!(map, "reverse" => reverse::ReverseBenchmark);
+        bm!(map, "reverse_tools" => reverse::ReverseToolsBenchmark);
+        bm!(map, "morse_code" => morse_code::MorseCodeBenchmark);
+        bm!(map, "morse_code_tools" => morse_code::MorseCodeToolsBenchmark);
+        bm!(map, "base64" => base64::Base64Benchmark);
+        bm!(map, "base64_tools" => base64::Base64ToolsBenchmark);
+        bm!(map, "hex" => hex::HexBenchmark);
+        bm!(map, "hex_tools" => hex::HexToolsBenchmark);
+        bm!(map, "svg_moonwalk" => svg_benchmarks::SvgMoonwalkBenchmark);
+        bm!(map, "svg_bike" => svg_benchmarks::SvgBikeBenchmark);
+        bm!(map, "minebench_tools" => minebench::MinebenchToolsBenchmark);
+        bm!(map, "ifeval" => ifeval::IFEvalBenchmark);
+        bm!(map, "harmbench" => harmbench::HarmBenchBenchmark);
+        bm!(map, "coding_eval" => coding_eval::CodingEvalBenchmark);
+        bm!(map, "humaneval" => coding_eval::HumanEvalBenchmark);
+        bm!(map, "humaneval_plus" => coding_eval::HumanEvalPlusBenchmark);
+        bm!(map, "mbpp_plus" => coding_eval::MbppPlusBenchmark);
+        bm!(map, "multipl_e" => multipl_e::MultiPLEBenchmark);
+        bm!(map, "swebench" => swe_bench::SweBenchBenchmark);
+        bm!(map, "swebench_verified" => swe_bench::SweBenchVerifiedBenchmark);
+        bm!(map, "swebench_pro" => swe_bench::SweBenchProBenchmark);
+        bm!(map, "swebench_multilingual" => swe_bench::SweBenchMultilingualBenchmark);
+        bm!(map, "tool_hallucination" => tool_hallucination::ToolHallucinationBenchmark);
         map.insert(
             "terminal_bench".to_string(),
             Box::new(terminal_bench::TerminalBenchBenchmark::new()) as Box<dyn Benchmark>,
         );
-        map.insert(
-            "truthful_qa".to_string(),
-            Box::new(truthful_qa::TruthfulQABenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "truthful_qa_mc2".to_string(),
-            Box::new(truthful_qa::TruthfulQAMC2Benchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "fever".to_string(),
-            Box::new(fever::FeverBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "halueval".to_string(),
-            Box::new(halueval::HaluEvalBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "true_false".to_string(),
-            Box::new(true_false::TrueFalseBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "faithdial".to_string(),
-            Box::new(faithdial::FaithDialBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "nq_open".to_string(),
-            Box::new(nq_open::NQOpenBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "triviaqa".to_string(),
-            Box::new(triviaqa::TriviaQABenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "mmlu_pro_plus".to_string(),
-            Box::new(mmlu_pro_plus::MmluProPlusBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "mmlu_prox".to_string(),
-            Box::new(mmlu_prox::MmluProxBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "race".to_string(),
-            Box::new(race::RaceBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "squad_v2".to_string(),
-            Box::new(squad_v2::SquadV2Benchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "xsum".to_string(),
-            Box::new(xsum::XSumBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "cnn_dailymail".to_string(),
-            Box::new(cnn_dailymail::CnnDailyMailBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "ea_mt".to_string(),
-            Box::new(ea_mt::EAMTBenchmark::default()) as Box<dyn Benchmark>,
-        );
+        bm!(map, "truthful_qa" => truthful_qa::TruthfulQABenchmark);
+        bm!(map, "truthful_qa_mc2" => truthful_qa::TruthfulQAMC2Benchmark);
+        bm!(map, "fever" => fever::FeverBenchmark);
+        bm!(map, "halueval" => halueval::HaluEvalBenchmark);
+        bm!(map, "true_false" => true_false::TrueFalseBenchmark);
+        bm!(map, "faithdial" => faithdial::FaithDialBenchmark);
+        bm!(map, "nq_open" => nq_open::NQOpenBenchmark);
+        bm!(map, "triviaqa" => triviaqa::TriviaQABenchmark);
+        bm!(map, "mmlu_pro_plus" => mmlu_pro_plus::MmluProPlusBenchmark);
+        bm!(map, "mmlu_prox" => mmlu_prox::MmluProxBenchmark);
+        bm!(map, "race" => race::RaceBenchmark);
+        bm!(map, "squad_v2" => squad_v2::SquadV2Benchmark);
+        bm!(map, "xsum" => xsum::XSumBenchmark);
+        bm!(map, "cnn_dailymail" => cnn_dailymail::CnnDailyMailBenchmark);
+        bm!(map, "ea_mt" => ea_mt::EAMTBenchmark);
         // --- New benchmarks: Research & Hallucination suite ---
-        map.insert(
-            "snli".to_string(),
-            Box::new(snli::SnliBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "popqa".to_string(),
-            Box::new(popqa::PopQABenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "cruxeval".to_string(),
-            Box::new(cruxeval::CruxEvalBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "ruler".to_string(),
-            Box::new(ruler::RulerBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "halubench".to_string(),
-            Box::new(halubench::HaluBenchBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "bbh".to_string(),
-            Box::new(bbh::BbhBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "bullshitbench".to_string(),
-            Box::new(bullshitbench::BullshitBenchBenchmark::default()) as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "linux_kernel_security".to_string(),
-            Box::new(linux_kernel_security::LinuxKernelSecurityBenchmark::default())
-                as Box<dyn Benchmark>,
-        );
-        map.insert(
-            "truthful_qa_gen".to_string(),
-            Box::new(truthful_qa_gen::TruthfulQAGenBenchmark::default()) as Box<dyn Benchmark>,
-        );
+        bm!(map, "snli" => snli::SnliBenchmark);
+        bm!(map, "popqa" => popqa::PopQABenchmark);
+        bm!(map, "cruxeval" => cruxeval::CruxEvalBenchmark);
+        bm!(map, "ruler" => ruler::RulerBenchmark);
+        bm!(map, "halubench" => halubench::HaluBenchBenchmark);
+        bm!(map, "bbh" => bbh::BbhBenchmark);
+        bm!(map, "bullshitbench" => bullshitbench::BullshitBenchBenchmark);
+        bm!(map, "linux_kernel_security" => linux_kernel_security::LinuxKernelSecurityBenchmark);
+        bm!(map, "truthful_qa_gen" => truthful_qa_gen::TruthfulQAGenBenchmark);
         map
     })
 }

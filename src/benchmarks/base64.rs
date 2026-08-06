@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
-use crate::utils::extract_task_stats;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -20,19 +20,20 @@ pub struct Base64ToolsBenchmark {
     state: Mutex<Base64State>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Base64State {
     instances: Vec<Base64Instance>,
     current_idx: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Base64Instance {
     plaintext: String,
     encoded: String,
     direction: Base64Direction,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 enum Base64Direction {
     Encode,
     Decode,
@@ -149,7 +150,7 @@ impl Benchmark for Base64Benchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         load_config(
-            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            &mut self.state.lock().unwrap_or_else(|p| p.into_inner()),
             config,
         );
         Ok(())
@@ -162,7 +163,7 @@ impl Benchmark for Base64Benchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -217,50 +218,7 @@ impl Benchmark for Base64Benchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let (total, correct, output_tokens, thinking_tokens) = extract_task_stats(&b.raw);
-
-        let accuracy = if total > 0 {
-            correct as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "accuracy".to_string(),
-            Score::float(accuracy, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        scores.insert("total".to_string(), Score::integer(total, ScoreUnit::Count));
-        scores.insert(
-            "correct".to_string(),
-            Score::integer(correct, ScoreUnit::Count).higher_is_better(true),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
-
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!("Base64: {} correct out of {}", correct, total),
-            }],
-            raw: b.raw.clone(),
-        })
+        crate::utils::build_accuracy_result("Base64", b)
     }
 }
 
@@ -279,7 +237,7 @@ impl Benchmark for Base64ToolsBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         load_config(
-            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            &mut self.state.lock().unwrap_or_else(|p| p.into_inner()),
             config,
         );
         Ok(())
@@ -292,7 +250,7 @@ impl Benchmark for Base64ToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -443,5 +401,72 @@ impl Benchmark for Base64ToolsBenchmark {
             }],
             raw: b.raw.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_encode_round_trip() {
+        assert_eq!(base64_encode("hello"), "aGVsbG8=");
+        assert_eq!(base64_encode(""), "");
+        assert_eq!(base64_encode("base64 works"), "YmFzZTY0IHdvcmtz");
+    }
+
+    #[test]
+    fn base64_decode_round_trip() {
+        assert_eq!(base64_decode("aGVsbG8=").unwrap(), "hello");
+        assert_eq!(base64_decode("").unwrap(), "");
+        assert_eq!(base64_decode("YmFzZTY0IHdvcmtz").unwrap(), "base64 works");
+    }
+
+    #[test]
+    fn base64_decode_rejects_invalid_input() {
+        assert!(base64_decode("###not valid base64###").is_err());
+    }
+
+    #[test]
+    fn build_instances_creates_encode_and_decode_pairs() {
+        let words = vec!["hi".to_string(), "there".to_string()];
+        let instances = build_instances(&words);
+        assert_eq!(instances.len(), 4);
+        // Every plaintext appears once as Encode and once as Decode.
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|i| i.plaintext == "hi" && i.direction == Base64Direction::Encode)
+                .count(),
+            1
+        );
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|i| i.plaintext == "hi" && i.direction == Base64Direction::Decode)
+                .count(),
+            1
+        );
+        // Encode instances' expected output is the base64 of the plaintext.
+        let encode_hi = instances
+            .iter()
+            .find(|i| i.plaintext == "hi" && i.direction == Base64Direction::Encode)
+            .unwrap();
+        assert_eq!(encode_hi.encoded, base64_encode("hi"));
+    }
+
+    #[test]
+    fn state_serializes_and_round_trips() {
+        // C6: state must be (de)serializable to support per-task resume.
+        let state = Base64State {
+            instances: build_instances(&["a".to_string(), "b".to_string()]),
+            current_idx: 3,
+        };
+        let json = serde_json::to_string(&state).expect("serialize");
+        let back: Base64State = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.current_idx, 3);
+        assert_eq!(back.instances.len(), state.instances.len());
+        assert_eq!(back.instances[0].plaintext, "a");
+        assert_eq!(back.instances[1].direction, Base64Direction::Decode);
     }
 }

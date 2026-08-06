@@ -424,7 +424,7 @@ impl Benchmark for ToolHallucinationBenchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let test_cases = generate_test_cases();
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.cases = test_cases;
         state.current_idx = 0;
         Ok(())
@@ -437,7 +437,7 @@ impl Benchmark for ToolHallucinationBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, case) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.cases.len() {
                 return Ok(None);
             }

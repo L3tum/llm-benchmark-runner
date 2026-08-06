@@ -8,9 +8,51 @@ use crate::shared::{
 };
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::sync::Mutex;
+
+/// Filter a KLD `BenchmarkResult` so its breakdown/raw only contain pairs and
+/// per-model scores relevant to a comparison. Moved here from `report.rs` so the
+/// generic comparison-report filter stays benchmark-agnostic.
+pub fn filter_kld_by_models(
+    result: &BenchmarkResult,
+    model_names: &HashSet<&str>,
+) -> BenchmarkResult {
+    let mut filtered = result.clone();
+    if let Some(breakdown) = filtered.breakdowns.get_mut("pairwise_kld") {
+        // Filter pairwise rows to only include pairs where both models are in the comparison.
+        let filtered_rows = breakdown
+            .rows
+            .iter()
+            .filter(|(key, _)| {
+                if let Some((a, b)) = key.split_once('_') {
+                    model_names.contains(a) && model_names.contains(b)
+                } else {
+                    false
+                }
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        breakdown.rows = filtered_rows;
+        // Also filter avg_kld_to_others from the raw field.
+        if let Some(raw_obj) = result.raw.as_object() {
+            let filtered_avg = raw_obj
+                .get("avg_kld_to_others")
+                .and_then(|v| v.as_object())
+                .map(|avg| {
+                    avg.iter()
+                        .filter(|(name, _)| model_names.contains(name.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<serde_json::Map<_, _>>()
+                });
+            if let Some(filtered_avg) = filtered_avg {
+                filtered.raw["avg_kld_to_others"] = serde_json::Value::Object(filtered_avg);
+            }
+        }
+    }
+    filtered
+}
 
 fn load_prompts_from_file(path: &str, num_prompts: usize) -> Result<Vec<String>> {
     let content = fs::read_to_string(path)?;
@@ -33,6 +75,7 @@ pub struct KldBenchmark {
     state: Mutex<KldState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct KldState {
     prompts: Vec<String>,
     current_idx: usize,
@@ -232,7 +275,7 @@ impl Benchmark for KldBenchmark {
             return Err(anyhow::anyhow!("No prompts loaded for KLD"));
         }
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.prompts = prompts;
         state.current_idx = 0;
         Ok(())
@@ -245,7 +288,7 @@ impl Benchmark for KldBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (prompt, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.prompts.len() {
                 return Ok(None);
             }
@@ -463,5 +506,88 @@ impl Benchmark for KldBenchmark {
             diagnostics: vec![],
             raw: serde_json::json!(pairwise),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::BreakdownTable;
+
+    fn sample_result() -> BenchmarkResult {
+        let mut rows = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert("avg_kld".to_string(), Score::float(0.5, ScoreUnit::Kld));
+        rows.insert("ModelA_ModelB".to_string(), row);
+        let mut row2 = BTreeMap::new();
+        row2.insert("avg_kld".to_string(), Score::float(0.7, ScoreUnit::Kld));
+        rows.insert("ModelA_ModelC".to_string(), row2);
+        BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::from([(
+                "pairwise_kld".to_string(),
+                BreakdownTable {
+                    title: "Pairwise KLD".to_string(),
+                    rows,
+                },
+            )]),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: serde_json::json!({
+                "avg_kld_to_others": {
+                    "ModelA": 0.5,
+                    "ModelB": 0.6,
+                    "ModelC": 0.7
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn filter_keeps_only_relevant_pairs() {
+        let names: HashSet<&str> = ["ModelA", "ModelB"].into_iter().collect();
+        let out = filter_kld_by_models(&sample_result(), &names);
+        let bd = out.breakdowns.get("pairwise_kld").unwrap();
+        // Only the ModelA_ModelB pair survives (both in comparison).
+        assert!(bd.rows.contains_key("ModelA_ModelB"));
+        assert!(!bd.rows.contains_key("ModelA_ModelC"));
+        // raw avg_kld_to_others filtered to the comparison models.
+        let raw = out.raw.get("avg_kld_to_others").unwrap();
+        assert_eq!(raw.get("ModelA").unwrap(), &serde_json::json!(0.5));
+        assert!(raw.get("ModelC").is_none());
+    }
+
+    fn lp(token: &str, logprob: f64) -> LogprobEntry {
+        LogprobEntry {
+            token: token.to_string(),
+            logprob,
+        }
+    }
+
+    #[test]
+    fn kl_identical_distributions_is_zero() {
+        let a = vec![lp("x", -0.1), lp("y", -0.2), lp("z", -1.5)];
+        let b = a.clone();
+        let kl = compute_kl_from_logprobs(&a, &b);
+        assert!((kl - 0.0).abs() < 1e-6, "expected ~0, got {kl}");
+    }
+
+    #[test]
+    fn kl_empty_distributions_is_infinite() {
+        // Empty input returns +inf (treated as "no overlap / not comparable").
+        assert!(compute_kl_from_logprobs(&[], &[]).is_infinite());
+    }
+
+    #[test]
+    fn kl_different_distributions_is_positive() {
+        // Same tokens, very different logprobs → positive KL.
+        let a = vec![lp("x", -0.05), lp("y", -0.1), lp("z", -2.0)];
+        let b = vec![lp("x", -2.0), lp("y", -0.1), lp("z", -0.05)];
+        let kl = compute_kl_from_logprobs(&a, &b);
+        assert!(
+            kl > 0.0 && !kl.is_infinite(),
+            "expected finite positive, got {kl}"
+        );
     }
 }

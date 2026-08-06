@@ -63,11 +63,7 @@ impl ReportGenerator for HtmlReportGenerator {
     }
 }
 
-#[allow(unused_assignments)]
 fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> CategoryData {
-    let mut model_count = 0;
-    let mut has_results = false;
-
     // Extract per-benchmark test data
     let mmlu_pro_data = input.tests.get(&TestName::new("mmlu_pro"));
     let gpqa_data = input.tests.get(&TestName::new("gpqa"));
@@ -306,8 +302,8 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
 
     match cat {
         BenchmarkCategory::Knowledge => {
-            has_results = mmlu_results.is_some() || gpqa_results.is_some();
-            model_count = mmlu_results
+            let has_results = mmlu_results.is_some() || gpqa_results.is_some();
+            let model_count = mmlu_results
                 .as_ref()
                 .map(|v: &Vec<(String, MmluProResult)>| v.len())
                 .unwrap_or(0)
@@ -335,8 +331,8 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
             }
         }
         BenchmarkCategory::Math => {
-            has_results = aime_results.is_some() || math500_results.is_some();
-            model_count = aime_results
+            let has_results = aime_results.is_some() || math500_results.is_some();
+            let model_count = aime_results
                 .as_ref()
                 .map(|v: &Vec<(String, AimeResult)>| v.len())
                 .unwrap_or(0)
@@ -364,8 +360,8 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
             }
         }
         BenchmarkCategory::ShortContextCoding => {
-            has_results = coding_eval_results.is_some();
-            model_count = coding_eval_results.as_ref().map(|v| v.len()).unwrap_or(0);
+            let has_results = coding_eval_results.is_some();
+            let model_count = coding_eval_results.as_ref().map(|v| v.len()).unwrap_or(0);
             CategoryData {
                 name: cat.display().to_string(),
                 name_slug: slugify_name(cat.display()),
@@ -384,8 +380,8 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
             }
         }
         BenchmarkCategory::LongContextCoding => {
-            has_results = swe_bench_results.is_some();
-            model_count = swe_bench_results.as_ref().map(|v| v.len()).unwrap_or(0);
+            let has_results = swe_bench_results.is_some();
+            let model_count = swe_bench_results.as_ref().map(|v| v.len()).unwrap_or(0);
             CategoryData {
                 name: cat.display().to_string(),
                 name_slug: slugify_name(cat.display()),
@@ -406,8 +402,8 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
             }
         }
         BenchmarkCategory::Creative => {
-            has_results = minebench_results.is_some();
-            model_count = minebench_results.as_ref().map(|v| v.len()).unwrap_or(0);
+            let has_results = minebench_results.is_some();
+            let model_count = minebench_results.as_ref().map(|v| v.len()).unwrap_or(0);
             CategoryData {
                 name: cat.display().to_string(),
                 name_slug: slugify_name(cat.display()),
@@ -426,8 +422,8 @@ fn build_category_data_for_cat(cat: &BenchmarkCategory, input: &ReportInput) -> 
             }
         }
         BenchmarkCategory::Similarity => {
-            has_results = !kld_pairwise.is_empty() || !kld_avg_results.is_empty();
-            model_count = kld_avg_results.len();
+            let has_results = !kld_pairwise.is_empty() || !kld_avg_results.is_empty();
+            let model_count = kld_avg_results.len();
             CategoryData {
                 name: cat.display().to_string(),
                 name_slug: slugify_name(cat.display()),
@@ -1332,3 +1328,74 @@ struct ReportTemplate<'a> {
 }
 
 impl HtmlReport for HtmlReportGenerator {}
+
+#[cfg(all(test, not(feature = "renderer-official")))]
+mod tests {
+    use super::*;
+
+    /// Renders the report template with a minebench `json_content` payload that tries to
+    /// break out of the `<template>` element and inject a script. Askama's default `{{ }}`
+    /// HTML-escaping must prevent the raw breakout from appearing in the output.
+    #[test]
+    fn json_content_is_html_escaped_in_template() {
+        let malicious = "{\"name\":\"</template><script>alert(1)</script>\"}";
+        let building = Building {
+            name: "b".into(),
+            valid_json: true,
+            json_content: malicious.to_string(),
+        };
+        let mr = MinebenchResult {
+            model: "m".into(),
+            buildings: vec![building],
+            output_tokens: "0".into(),
+            thinking_tokens: "0".into(),
+        };
+        let token_usage = HashMap::new();
+
+        let tpl = ReportTemplate {
+            generated_at: "2026-01-01",
+            models: "m",
+            models_list: &["m".to_string()],
+            token_usage_results: &token_usage,
+            summary: &["s".to_string()],
+            category_data: vec![CategoryData {
+                name: "minebench".into(),
+                name_slug: "minebench".into(),
+                has_results: true,
+                model_count: 1,
+                mmlu_pro_results: vec![],
+                gpqa_results: vec![],
+                supergpqa_results: vec![],
+                aime_results: vec![],
+                math500_results: vec![],
+                minebench_results: vec![("m".to_string(), mr)],
+                coding_eval_results: vec![],
+                swe_bench_results: vec![],
+                kld_results: HashMap::new(),
+                kld_avg_results: vec![],
+            }],
+        };
+        let html = tpl.render().expect("render");
+
+        // The breakout/injection sequence must NOT appear unescaped.
+        assert!(
+            !html.contains("</template><script>"),
+            "template breakout was not escaped"
+        );
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "raw script tag was not escaped"
+        );
+        // The payload must be HTML-escaped so the browser treats the angle
+        // brackets as text, not markup. Askama emits numeric character
+        // references (&#60; = '<', &#62; = '>').
+        assert!(
+            html.contains("&#60;/template&#62;"),
+            "template-close token was not HTML-escaped"
+        );
+        assert!(
+            html.contains("&#60;script&#62;"),
+            "script open tag was not HTML-escaped"
+        );
+    }
+}

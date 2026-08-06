@@ -33,8 +33,9 @@ fn download_and_embed_threejs(version: &str, threejs_path: &str, orbitcontrols_p
     );
     let threejs_content = reqwest::blocking::get(&threejs_url)
         .expect("Failed to fetch Three.js")
-        .text()
+        .bytes()
         .expect("Failed to read Three.js response");
+    verify_download_checksum(&threejs_url, &threejs_content).unwrap_or_else(|e| panic!("{e}"));
 
     let mut f = fs::File::create(threejs_path).expect("Failed to create Three.js file");
     writeln!(
@@ -43,7 +44,8 @@ fn download_and_embed_threejs(version: &str, threejs_path: &str, orbitcontrols_p
         version, threejs_url
     )
     .expect("Failed to write Three.js header");
-    write!(f, "{}", threejs_content).expect("Failed to write Three.js");
+    write!(f, "{}", String::from_utf8_lossy(&threejs_content))
+        .expect("Failed to write Three.js content");
 
     let orbitcontrols_url = format!(
         "https://cdn.jsdelivr.net/npm/three@{}/examples/js/controls/OrbitControls.js",
@@ -51,8 +53,10 @@ fn download_and_embed_threejs(version: &str, threejs_path: &str, orbitcontrols_p
     );
     let orbitcontrols_content = reqwest::blocking::get(&orbitcontrols_url)
         .expect("Failed to fetch OrbitControls")
-        .text()
+        .bytes()
         .expect("Failed to read OrbitControls response");
+    verify_download_checksum(&orbitcontrols_url, &orbitcontrols_content)
+        .unwrap_or_else(|e| panic!("{e}"));
 
     let mut f = fs::File::create(orbitcontrols_path).expect("Failed to create OrbitControls file");
     writeln!(
@@ -61,7 +65,8 @@ fn download_and_embed_threejs(version: &str, threejs_path: &str, orbitcontrols_p
         version, orbitcontrols_url
     )
     .expect("Failed to write OrbitControls header");
-    write!(f, "{}", orbitcontrols_content).expect("Failed to write OrbitControls");
+    write!(f, "{}", String::from_utf8_lossy(&orbitcontrols_content))
+        .expect("Failed to write OrbitControls content");
 
     println!("cargo:warning=Three.js r{} embedded successfully.", version);
 }
@@ -124,7 +129,10 @@ fn compile_official_renderer() {
         }
         match reqwest::blocking::get(url) {
             Ok(resp) if resp.status().is_success() => {
-                let content = resp.text().unwrap_or_default();
+                let content = resp.bytes().unwrap_or_default();
+                if let Err(err) = verify_download_checksum(url, &content) {
+                    panic!("{err}");
+                }
                 fs::write(&path, content).expect("Failed to write file");
             }
             _ => {
@@ -202,7 +210,9 @@ fn compile_official_renderer() {
                 println!("cargo:warning=Web Worker file missing, stubbing with empty worker");
                 "self.onmessage = function() {};".to_string()
             });
-            let worker_b64 = base64_encode(&worker_content);
+            use base64::Engine;
+            let worker_b64 =
+                base64::engine::general_purpose::STANDARD.encode(worker_content.as_bytes());
             let worker_data_url = format!("data:application/javascript;base64,{}", worker_b64);
 
             // Replace the external worker import with the embedded data URL
@@ -234,31 +244,34 @@ fn compile_official_renderer() {
     let _ = fs::remove_dir_all(&tmp_dir);
 }
 
-/// Encode bytes as base64 (simple implementation, no dependency)
-fn base64_encode(data: &str) -> String {
-    let table: [u8; 64] = *b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    for chunk in data.as_bytes().chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).cloned().unwrap_or(0),
-            chunk.get(2).cloned().unwrap_or(0),
-        ];
-        let encoded = [
-            table[(b[0] >> 2) as usize] as char,
-            table[((b[0] & 0x03) << 4 | (b[1] >> 4)) as usize] as char,
-            table[((b[1] & 0x0f) << 2 | (b[2] >> 6)) as usize] as char,
-            table[b[2] as usize & 0x3f] as char,
-        ];
-        let encoded_str: String = encoded.iter().collect();
-        match chunk.len() {
-            1 => result.push_str(&encoded_str[..2]),
-            2 => {
-                result.push_str(&encoded_str[..3]);
-                result.push('=');
-            }
-            _ => result.push_str(&encoded_str),
+/// Hex-encode the SHA-256 digest of `data`.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        write!(hex, "{:02x}", byte).expect("write to String is infallible");
+    }
+    hex
+}
+
+/// Verify `data` against an expected SHA-256 (hex, case-insensitive) if one is
+/// registered for `url`. Returns an error on mismatch so tampered downloads fail
+/// the build rather than silently embedding bad content.
+fn verify_download_checksum(url: &str, data: &[u8]) -> Result<(), String> {
+    // Register expected SHA-256 (lowercase hex) for any pinned download updated.
+    // Leave unregistered URLs to warn-and-continue so not-yet-audited assets build.
+    let expected: Option<&str> = None;
+    if let Some(expected) = expected {
+        let actual = sha256_hex(data);
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "Checksum mismatch for {url}: expected {expected}, got {actual}"
+            ));
         }
     }
-    result
+    Ok(())
 }

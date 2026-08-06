@@ -17,6 +17,7 @@ pub struct CodingEvalBenchmark {
     state: Mutex<CodingEvalState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct CodingEvalState {
     items: Vec<serde_json::Value>,
     current_idx: usize,
@@ -262,7 +263,7 @@ pub fn common_coding_to_report_result(b: &BenchmarkResult) -> Result<BenchmarkRe
     benchmark.to_report_result(b)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TaskType {
     HumanEval,
     HumanEvalPlus,
@@ -288,7 +289,7 @@ impl TaskType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)] // language and tasks_path reserved for future multi-language support
 struct TasksetConfig {
     name: String,
@@ -297,7 +298,7 @@ struct TasksetConfig {
     tasks_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)] // pass2/pass3/multi-language/host-repo fields reserved for full harness support
 struct CodingEvalConfig {
     tasksets: Vec<TasksetConfig>,
@@ -380,7 +381,7 @@ impl Benchmark for CodingEvalBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("Coding Eval: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -394,7 +395,7 @@ impl Benchmark for CodingEvalBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -527,7 +528,7 @@ impl Benchmark for HumanEvalBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("HumanEval: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -541,7 +542,7 @@ impl Benchmark for HumanEvalBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -604,7 +605,7 @@ impl Benchmark for HumanEvalPlusBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("HumanEval+: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -618,7 +619,7 @@ impl Benchmark for HumanEvalPlusBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -681,7 +682,7 @@ impl Benchmark for MbppPlusBenchmark {
         let items = load_jsonl(&data_path)?;
         let limit = cfg.num_samples.unwrap_or(items.len());
         println!("MBPP+: {} problems (limit: {})", items.len(), limit);
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items.into_iter().take(limit).collect();
         state.current_idx = 0;
         state.config = Some(cfg);
@@ -695,7 +696,7 @@ impl Benchmark for MbppPlusBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (idx, item, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -751,12 +752,67 @@ fn extract_code(response: &str) -> String {
     response.trim().to_string()
 }
 
+/// Validate that `entry_point` is a safe, plain Python identifier that can be
+/// interpolated into a generated test harness. Rejects metacharacters and
+/// dangerous builtins that could inject arbitrary Python code.
+fn validate_entry_point(name: &str) -> Result<&str> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(anyhow::anyhow!("Invalid entry_point: bad length"));
+    }
+    let valid = name.chars().enumerate().all(|(i, c)| {
+        if i == 0 {
+            c.is_ascii_alphabetic() || c == '_'
+        } else {
+            c.is_ascii_alphanumeric() || c == '_'
+        }
+    });
+    if !valid {
+        return Err(anyhow::anyhow!(
+            "Invalid entry_point '{name}': must be a valid Python identifier"
+        ));
+    }
+    const DANGEROUS: &[&str] = &[
+        "__import__",
+        "exec",
+        "eval",
+        "compile",
+        "globals",
+        "locals",
+        "open",
+        "input",
+        "getattr",
+        "setattr",
+        "delattr",
+        "vars",
+        "type",
+        "object",
+        "__class__",
+        "__bases__",
+        "__subclasses__",
+    ];
+    if DANGEROUS.contains(&name) {
+        return Err(anyhow::anyhow!(
+            "Invalid entry_point '{name}': dangerous builtin name"
+        ));
+    }
+    Ok(name)
+}
+
 fn run_coding_test(task_item: &JsonValue, code: &str, cfg: &CodingEvalConfig) -> bool {
     let entry_point = task_item
         .get("entry_point")
         .and_then(|v| v.as_str())
         .unwrap_or("solution")
         .to_string();
+    // Reject unsafe entry_point values instead of interpolating them into the
+    // generated harness (command/code injection guard).
+    if validate_entry_point(&entry_point).is_err() {
+        eprintln!(
+            "warning: skipping task with unsafe entry_point {:?}",
+            entry_point
+        );
+        return false;
+    }
     let test_str = task_item
         .get("test")
         .and_then(|v| v.as_str())
@@ -944,5 +1000,24 @@ mod tests {
         let plus = vec![json!({"input": {}, "output": 3})];
         let h = generate_test_harness("f", "def f(): return 3", &None, &None, &Some(plus), 1e-6);
         assert!(h.contains("INPUTS"));
+    }
+
+    #[test]
+    fn validate_entry_point_accepts_plain_identifiers() {
+        assert!(validate_entry_point("solution").is_ok());
+        assert!(validate_entry_point("_helper").is_ok());
+        assert!(validate_entry_point("myFunc2").is_ok());
+    }
+
+    #[test]
+    fn validate_entry_point_rejects_injection() {
+        // Shell/Python injection attempts must be rejected.
+        assert!(validate_entry_point("x); __import__('os').system('id'); #").is_err());
+        assert!(validate_entry_point("x; rm -rf /").is_err());
+        assert!(validate_entry_point("__import__").is_err());
+        assert!(validate_entry_point("exec").is_err());
+        assert!(validate_entry_point("open").is_err());
+        assert!(validate_entry_point("__class__").is_err());
+        assert!(validate_entry_point("").is_err());
     }
 }

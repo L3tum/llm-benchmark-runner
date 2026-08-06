@@ -5,17 +5,17 @@ use crate::shared::{BenchmarkResult, Diagnostic, TaskResult};
 use crate::token_tracker::TokenTracker;
 use crate::utils::format_duration;
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Global tracker for the currently running model process PID.
 /// Used by the ctrl-c handler to stop the model gracefully.
-pub static CURRENT_MODEL_PID: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
+pub static CURRENT_MODEL_PID: LazyLock<Mutex<Option<u64>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Runs a model through the given benchmarks and returns (model_results, successful, failed, timings).
 /// model_results is a HashMap from benchmark name to the in-memory BenchmarkResult.
@@ -38,6 +38,9 @@ pub fn run_model(
     let mut process_guard = ModelProcessGuard::new(process, model.cmd_stop.clone());
 
     let client = Client::new(&model.proxy)?;
+    if let Some(ms) = model.rate_limit_ms {
+        client.set_rate_limit(ms);
+    }
     if !wait_for_health(&client) {
         return Err(anyhow::anyhow!("Proxy did not become healthy"));
     }
@@ -155,6 +158,11 @@ pub fn start_model(cmd: &str) -> Result<Child> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .pre_exec(|| {
+                // SAFETY: `setsid()` is callable in the child just after fork(),
+                // before any threads are spawned in the child, so it cannot
+                // interfere with another thread's process group membership.
+                // It returns -1 on error; we ignore the result to keep the
+                // child running even if it fails to create a new session.
                 libc::setsid();
                 Ok(())
             })
@@ -219,6 +227,9 @@ fn run_benchmark(
 ) -> Result<BenchmarkResult> {
     // Create tracker for this benchmark run
     let client = Client::new_with_model_params(&model.proxy, model.set_params.as_ref())?;
+    if let Some(ms) = model.rate_limit_ms {
+        client.set_rate_limit(ms);
+    }
     let mut tracker = TokenTracker::new(client);
 
     let mut task_results: Vec<TaskResult> = Vec::new();
@@ -272,6 +283,12 @@ fn run_benchmark(
 }
 
 pub fn wait_for_health(client: &Client) -> bool {
+    // Fast path: a health check succeeded recently, skip redundant roundtrips.
+    // Benchmarks within a model share the same Client, so this avoids 80+
+    // repeated HTTP health checks across a run.
+    if client.recently_healthy(Duration::from_secs(30)) {
+        return true;
+    }
     const STABLE_HEALTH_CHECKS: usize = 2;
     let timeout = Duration::from_secs(120);
     let poll = Duration::from_secs(2);
@@ -283,6 +300,7 @@ pub fn wait_for_health(client: &Client) -> bool {
             Ok(_) => {
                 consecutive_successes += 1;
                 if consecutive_successes >= STABLE_HEALTH_CHECKS {
+                    client.mark_healthy();
                     return true;
                 }
                 std::thread::sleep(poll);

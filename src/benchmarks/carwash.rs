@@ -10,6 +10,7 @@ pub struct CarwashBenchmark {
     state: Mutex<CarwashState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct CarwashState {
     done: bool,
 }
@@ -44,7 +45,7 @@ impl Benchmark for CarwashBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let should_execute = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.done {
                 return Ok(None);
             }

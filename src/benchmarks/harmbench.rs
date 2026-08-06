@@ -13,6 +13,7 @@ pub struct HarmBenchBenchmark {
     state: Mutex<HarmbenchState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct HarmbenchState {
     items: Vec<HarmBenchInstance>,
     current_idx: usize,
@@ -123,7 +124,7 @@ impl Benchmark for HarmBenchBenchmark {
             ));
         }
         let dataset = load_harmbench_dataset()?;
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = dataset;
         state.current_idx = 0;
         Ok(())
@@ -136,7 +137,7 @@ impl Benchmark for HarmBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

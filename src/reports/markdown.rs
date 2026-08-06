@@ -73,10 +73,8 @@ fn render_test_md(md: &mut String, test_data: &TestReportData) {
         md.push_str("**Score:** N/A\n\n");
     } else {
         // Header row
-        md.push_str("| Model | Score | ");
-        md.push_str(&format!("{} |", test_data.display_name));
-        md.push_str("\n| --- | --- | ");
-        md.push_str(&format!("{} |", test_data.display_name));
+        md.push_str("| Model | Score |\n");
+        md.push_str("| --- | --- |\n");
         md.push('\n');
 
         // Per-model row
@@ -87,10 +85,7 @@ fn render_test_md(md: &mut String, test_data: &TestReportData) {
                 .find(|s| s.primary)
                 .map(|s| s.display_value())
                 .unwrap_or_else(|| "–".into());
-            md.push_str(&format!(
-                "| {} | {} | {} |\n",
-                model, score, test_data.display_name
-            ));
+            md.push_str(&format!("| {} | {} |\n", model, score));
         }
     }
 

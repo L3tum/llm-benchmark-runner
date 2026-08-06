@@ -1,12 +1,18 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
-use crate::utils::extract_task_stats;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+
+/// Reverse a string by Unicode scalar values (grapheme-agnostic, matching the
+/// scoring logic in `execute_one`).
+fn reverse_str(s: &str) -> String {
+    s.chars().rev().collect()
+}
 
 /// Reverse writing benchmark: ask the model to reverse a word.
 /// Direct prompt variant.
@@ -20,6 +26,7 @@ pub struct ReverseToolsBenchmark {
     state: Mutex<ReverseState>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct ReverseState {
     words: Vec<String>,
     current_idx: usize,
@@ -116,7 +123,7 @@ impl Benchmark for ReverseBenchmark {
         let custom_words = config::extract_string_vec(config, "words");
         let num_samples = config::extract_usize(config, "num_samples");
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(words) = custom_words {
             state.words = words;
         }
@@ -138,7 +145,7 @@ impl Benchmark for ReverseBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (word, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.words.len() {
                 return Ok(None);
             }
@@ -151,7 +158,7 @@ impl Benchmark for ReverseBenchmark {
         let prompt = format!("Write the word '{}' in reverse.", word);
         let response = tracker.chat_completion(&model.model_name, "", &prompt)?;
 
-        let expected = word.chars().rev().collect::<String>();
+        let expected = reverse_str(&word);
         let trimmed = response.trim();
         let pass = trimmed.to_lowercase() == expected.to_lowercase();
 
@@ -167,50 +174,7 @@ impl Benchmark for ReverseBenchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let (total, correct, output_tokens, thinking_tokens) = extract_task_stats(&b.raw);
-
-        let accuracy = if total > 0 {
-            correct as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "accuracy".to_string(),
-            Score::float(accuracy, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        scores.insert("total".to_string(), Score::integer(total, ScoreUnit::Count));
-        scores.insert(
-            "correct".to_string(),
-            Score::integer(correct, ScoreUnit::Count).higher_is_better(true),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
-
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!("Reverse: {} correct out of {}", correct, total),
-            }],
-            raw: b.raw.clone(),
-        })
+        crate::utils::build_accuracy_result("Reverse", b)
     }
 }
 
@@ -231,7 +195,7 @@ impl Benchmark for ReverseToolsBenchmark {
         let custom_words = config::extract_string_vec(config, "words");
         let num_samples = config::extract_usize(config, "num_samples");
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(words) = custom_words {
             state.words = words;
         }
@@ -253,7 +217,7 @@ impl Benchmark for ReverseToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (word, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.words.len() {
                 return Ok(None);
             }
@@ -297,7 +261,7 @@ impl Benchmark for ReverseToolsBenchmark {
         tracker.record_tool_calls(&tool_calls, &tools);
 
         // Simulate the tool locally: extract the input parameter and reverse it
-        let expected = word.chars().rev().collect::<String>();
+        let expected = reverse_str(&word);
         let mut pass = false;
         let mut tool_input = String::new();
 
@@ -357,5 +321,28 @@ impl Benchmark for ReverseToolsBenchmark {
             }],
             raw: b.raw.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reverse_reverses_ascii() {
+        assert_eq!(reverse_str("hello"), "olleh");
+        assert_eq!(reverse_str("racecar"), "racecar");
+        assert_eq!(reverse_str(""), "");
+    }
+
+    #[test]
+    fn reverse_is_case_sensitive() {
+        // Scoring compares case-insensitively, but the reversal itself is exact.
+        assert_eq!(reverse_str("Hello"), "olleH");
+    }
+
+    #[test]
+    fn reverse_handles_unicode_scalars() {
+        assert_eq!(reverse_str("héllo"), "olléh");
     }
 }

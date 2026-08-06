@@ -1,10 +1,10 @@
 use crate::benchmarks::Benchmark;
 use crate::config;
 use crate::config::Model;
-use crate::shared::{BenchmarkCategory, BenchmarkResult, Score, ScoreUnit, TaskResult};
+use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
-use crate::utils::extract_task_stats;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -20,19 +20,20 @@ pub struct HexToolsBenchmark {
     state: Mutex<HexState>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct HexState {
     instances: Vec<HexInstance>,
     current_idx: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct HexInstance {
     plaintext: String,
     hex_encoded: String,
     direction: HexDirection,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 enum HexDirection {
     Encode,
     Decode,
@@ -160,7 +161,7 @@ impl Benchmark for HexBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         load_config(
-            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            &mut self.state.lock().unwrap_or_else(|p| p.into_inner()),
             config,
         );
         Ok(())
@@ -173,7 +174,7 @@ impl Benchmark for HexBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -228,50 +229,7 @@ impl Benchmark for HexBenchmark {
     }
 
     fn to_report_result(&self, b: &BenchmarkResult) -> Result<BenchmarkResult> {
-        let (total, correct, output_tokens, thinking_tokens) = extract_task_stats(&b.raw);
-
-        let accuracy = if total > 0 {
-            correct as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let mut scores = BTreeMap::new();
-        scores.insert(
-            "accuracy".to_string(),
-            Score::float(accuracy, ScoreUnit::Percent)
-                .primary(true)
-                .higher_is_better(true),
-        );
-        scores.insert("total".to_string(), Score::integer(total, ScoreUnit::Count));
-        scores.insert(
-            "correct".to_string(),
-            Score::integer(correct, ScoreUnit::Count).higher_is_better(true),
-        );
-        if output_tokens > 0 {
-            scores.insert(
-                "output_tokens".to_string(),
-                Score::integer(output_tokens, ScoreUnit::Tokens),
-            );
-        }
-        if thinking_tokens > 0 {
-            scores.insert(
-                "thinking_tokens".to_string(),
-                Score::integer(thinking_tokens, ScoreUnit::Tokens),
-            );
-        }
-
-        Ok(BenchmarkResult {
-            scores,
-            breakdowns: BTreeMap::new(),
-            error_classification: BTreeMap::new(),
-            artifacts: vec![],
-            diagnostics: vec![crate::reports::model::Diagnostic {
-                level: "info".to_string(),
-                message: format!("Hex: {} correct out of {}", correct, total),
-            }],
-            raw: b.raw.clone(),
-        })
+        crate::utils::build_accuracy_result("Hex", b)
     }
 }
 
@@ -290,7 +248,7 @@ impl Benchmark for HexToolsBenchmark {
 
     fn pre_execute(&self, config: &yaml_serde::Value) -> Result<()> {
         load_config(
-            &mut self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG),
+            &mut self.state.lock().unwrap_or_else(|p| p.into_inner()),
             config,
         );
         Ok(())
@@ -303,7 +261,7 @@ impl Benchmark for HexToolsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, task_id) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }
@@ -465,5 +423,46 @@ impl Benchmark for HexToolsBenchmark {
             }],
             raw: b.raw.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_encode_round_trip() {
+        assert_eq!(hex_encode("hello"), "68656c6c6f");
+        assert_eq!(hex_encode(""), "");
+        assert_eq!(hex_encode("AB"), "4142");
+    }
+
+    #[test]
+    fn hex_decode_round_trip() {
+        assert_eq!(hex_decode("68656c6c6f").unwrap(), "hello");
+        assert_eq!(hex_decode("").unwrap(), "");
+        assert_eq!(hex_decode("41 42").unwrap(), "AB"); // spaces tolerated
+    }
+
+    #[test]
+    fn hex_decode_rejects_odd_length() {
+        assert!(hex_decode("6865c").is_err());
+    }
+
+    #[test]
+    fn hex_decode_rejects_invalid_digits() {
+        assert!(hex_decode("zz").is_err());
+    }
+
+    #[test]
+    fn build_instances_pairs_encode_and_decode() {
+        let texts = vec!["xy".to_string(), "hello".to_string()];
+        let inst = build_instances(&texts);
+        assert_eq!(inst.len(), 4);
+        let enc = inst
+            .iter()
+            .find(|i| i.plaintext == "xy" && i.direction == HexDirection::Encode)
+            .unwrap();
+        assert_eq!(enc.hex_encoded, "7879");
     }
 }

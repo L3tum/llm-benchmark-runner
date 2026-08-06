@@ -4,12 +4,12 @@ use crate::download::download_parquet_records;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -25,6 +25,7 @@ pub struct MmluProBenchmark {
     state: Mutex<MmluProState>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct MmluProState {
     items: Vec<MmluItem>,
     current_idx: usize,
@@ -132,7 +133,7 @@ impl Benchmark for MmluProBenchmark {
         let data_path = self.download_dataset("test")?;
         let all_items = self.load_dataset(&data_path)?;
         println!("MMLU-Pro: {} total questions", all_items.len());
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = all_items;
         state.current_idx = 0;
         Ok(())
@@ -145,7 +146,7 @@ impl Benchmark for MmluProBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (q, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -323,11 +324,13 @@ impl Benchmark for MmluProBenchmark {
     }
 }
 
-static RE_ANSWER_IS: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\banswer is\s*\(?([A-J])\)?").unwrap());
-static RE_ANSWER_COLON: Lazy<Regex> = Lazy::new(|| Regex::new(r"[aA]nswer:\s*([A-J])").unwrap());
-static RE_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-J])\b").unwrap());
-static RE_SEQUENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[A-J][\s]*[,;:]\s*[A-J]").unwrap());
+static RE_ANSWER_IS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\banswer is\s*\(?([A-J])\)?").unwrap());
+static RE_ANSWER_COLON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[aA]nswer:\s*([A-J])").unwrap());
+static RE_LETTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-J])\b").unwrap());
+static RE_SEQUENCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-J][\s]*[,;:]\s*[A-J]").unwrap());
 
 fn extract_answer(text: &str) -> Option<char> {
     // Scan entire text for answer patterns, use the last match
@@ -358,4 +361,45 @@ fn extract_answer(text: &str) -> Option<char> {
         }
     }
     last_letter
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_answer_from_answer_is() {
+        assert_eq!(extract_answer("The answer is (D)."), Some('D'));
+        assert_eq!(extract_answer("answer is E"), Some('E'));
+    }
+
+    #[test]
+    fn extract_answer_from_answer_colon() {
+        assert_eq!(extract_answer("Answer: B"), Some('B'));
+        assert_eq!(extract_answer("the answer: A"), Some('A'));
+    }
+
+    #[test]
+    fn extract_answer_prefers_last_after_priority() {
+        // RE_ANSWER_IS takes precedence; among its matches, use the last.
+        let text = "First: answer is A. Conclusion: answer is F";
+        assert_eq!(extract_answer(text), Some('F'));
+    }
+
+    #[test]
+    fn extract_answer_falls_back_to_answer_colon() {
+        // No "answer is" → falls back to "Answer:" colon pattern.
+        assert_eq!(extract_answer("The Answer: B"), Some('B'));
+    }
+
+    #[test]
+    fn extract_answer_ignores_letters_running_out_of_range() {
+        // 'Z' is not A-J, so it must not be returned.
+        assert_eq!(extract_answer("The answer is Z"), None);
+    }
+
+    #[test]
+    fn extract_answer_none_when_no_letter() {
+        assert_eq!(extract_answer("unknown response text here"), None);
+    }
 }

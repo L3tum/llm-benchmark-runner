@@ -20,6 +20,7 @@ pub struct XSumBenchmark {
     state: Mutex<XSumState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct XSumState {
     items: Vec<XSumItem>,
     current_idx: usize,
@@ -102,7 +103,7 @@ impl Benchmark for XSumBenchmark {
 
     fn pre_execute(&self, _config: &yaml_serde::Value) -> Result<()> {
         let items = load_xsum_dataset()?;
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -115,7 +116,7 @@ impl Benchmark for XSumBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -338,4 +339,41 @@ fn longest_common_subsequence_len(a: &[&str], b: &[&str]) -> usize {
         }
     }
     dp[m][n]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rouge_identical_scores_one() {
+        let (r1, r2, rl) = compute_rouge_scores("hello world", "hello world");
+        assert!((r1 - 1.0).abs() < 1e-6);
+        assert!((r2 - 1.0).abs() < 1e-6);
+        assert!((rl - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rouge_case_insensitive() {
+        let (r1, _, _) = compute_rouge_scores("Hello World", "hello world");
+        assert!((r1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rouge_completely_different_is_zero() {
+        let (r1, _, _) = compute_rouge_scores("the quick brown fox", "zzz yyy xxx");
+        assert_eq!(r1, 0.0);
+    }
+
+    #[test]
+    fn rouge_partial_overlap_between_zero_and_one() {
+        let (r1, _, _) = compute_rouge_scores("a b c d", "a b c e");
+        assert!(r1 > 0.0 && r1 < 1.0);
+    }
+
+    #[test]
+    fn ngrams_produces_windows() {
+        let toks: Vec<&str> = vec!["a", "b", "c"];
+        assert_eq!(ngrams(&toks, 2), vec![vec!["a", "b"], vec!["b", "c"]]);
+    }
 }

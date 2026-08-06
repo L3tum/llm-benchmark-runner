@@ -368,7 +368,7 @@ impl Benchmark for AppsBenchmark {
             items.iter().filter(|i| !i.is_call_based()).count()
         );
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.config = cfg;
@@ -382,7 +382,7 @@ impl Benchmark for AppsBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -400,7 +400,7 @@ impl Benchmark for AppsBenchmark {
 
         // Store solution for batch evaluation
         {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.generated_solutions.insert(
                 format!("task-{}", idx),
                 AppsSolution {
@@ -432,7 +432,7 @@ impl Benchmark for AppsBenchmark {
         _config: &yaml_serde::Value,
     ) -> Result<Option<Vec<TaskResult>>> {
         let (solutions, instances, cfg) = {
-            let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.generated_solutions.is_empty() {
                 return Ok(None);
             }

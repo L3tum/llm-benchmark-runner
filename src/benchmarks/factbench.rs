@@ -295,7 +295,7 @@ impl Benchmark for FactBenchBenchmark {
             items.len(),
             max_items
         );
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.used_synthetic = factbench_used_synthetic();
@@ -309,7 +309,7 @@ impl Benchmark for FactBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (item, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -513,7 +513,7 @@ Answer:"#;
                         accuracy * 100.0
                     ),
                 }];
-                let state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+                let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
                 if state.used_synthetic {
                     diags.push(Diagnostic {
                         level: "warning".to_string(),

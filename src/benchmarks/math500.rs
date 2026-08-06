@@ -4,15 +4,15 @@ use crate::download::download_with_retry_bytes;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 
 /// Single MATH-500 problem.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Math500Item {
     pub problem: String,
     pub answer: String,
@@ -23,6 +23,7 @@ pub struct Math500Benchmark {
     state: Mutex<Math500State>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Math500State {
     items: Vec<Math500Item>,
     current_idx: usize,
@@ -120,7 +121,7 @@ impl Benchmark for Math500Benchmark {
             items.len()
         );
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         Ok(())
@@ -133,7 +134,7 @@ impl Benchmark for Math500Benchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (q, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -347,7 +348,7 @@ impl Math500Benchmark {
     }
 }
 
-static RE_BOXED: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\boxed\{(\d+)\}").unwrap());
+static RE_BOXED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\boxed\{(\d+)\}").unwrap());
 
 /// Extract integer answer from boxed notation like \boxed{123}.
 fn extract_int_answer(text: &str) -> Option<String> {
@@ -356,4 +357,31 @@ fn extract_int_answer(text: &str) -> Option<String> {
         .last()
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_boxed_integer() {
+        assert_eq!(extract_int_answer(r"\boxed{123}"), Some("123".to_string()));
+        assert_eq!(
+            extract_int_answer("= \\boxed{042}"),
+            Some("042".to_string())
+        );
+    }
+
+    #[test]
+    fn uses_last_boxed_answer() {
+        assert_eq!(
+            extract_int_answer(r"\boxed{1} then \boxed{99}"),
+            Some("99".to_string())
+        );
+    }
+
+    #[test]
+    fn no_boxed_answer_returns_none() {
+        assert_eq!(extract_int_answer("no answer"), None);
+    }
 }

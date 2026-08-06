@@ -248,3 +248,77 @@ fn new_benchmarks_are_registered() {
         "multipl_e should be registered"
     );
 }
+
+/// Guard against a benchmark silently dropping out of the registry (e.g. during
+/// a registry rewrite). The macro-based registry must contain every expected
+/// benchmark name.
+#[test]
+fn registry_contains_all_expected_benchmarks() {
+    let expected = [
+        "mmlu_pro",
+        "supergpqa",
+        "kld",
+        "gpqa",
+        "aime",
+        "apps",
+        "math500",
+        "minebench",
+        "carwash",
+        "fictional_language",
+        "efficient_language",
+        "reverse",
+        "reverse_tools",
+        "morse_code",
+        "morse_code_tools",
+        "base64",
+        "base64_tools",
+        "hex",
+        "hex_tools",
+        "svg_moonwalk",
+        "svg_bike",
+        "minebench_tools",
+        "ifeval",
+        "harmbench",
+        "coding_eval",
+        "humaneval",
+        "humaneval_plus",
+        "mbpp_plus",
+        "multipl_e",
+        "swebench",
+        "swebench_verified",
+        "swebench_pro",
+        "swebench_multilingual",
+        "tool_hallucination",
+        "terminal_bench",
+        "truthful_qa",
+        "truthful_qa_mc2",
+        "fever",
+        "halueval",
+        "true_false",
+        "faithdial",
+        "nq_open",
+        "triviaqa",
+        "mmlu_pro_plus",
+        "mmlu_prox",
+        "race",
+        "squad_v2",
+        "xsum",
+        "cnn_dailymail",
+        "ea_mt",
+        "snli",
+        "popqa",
+        "cruxeval",
+        "ruler",
+        "halubench",
+        "bbh",
+        "bullshitbench",
+        "linux_kernel_security",
+        "truthful_qa_gen",
+    ];
+    for name in expected {
+        assert!(
+            get_benchmark(name).is_ok(),
+            "benchmark '{name}' missing from registry"
+        );
+    }
+}

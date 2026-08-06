@@ -95,6 +95,9 @@ pub fn download_with_retry_bytes_opt(
         let resp = request.send();
         match resp {
             Ok(resp) => {
+                // Reject non-success HTTP statuses (4xx/5xx) instead of
+                // treating the error page body as a successful download.
+                let resp = resp.error_for_status()?;
                 let bytes = resp.bytes()?;
                 // Enforce pinned checksum when this URL is registered.
                 if let Some(expected) = lookup_checksum(url) {
@@ -138,11 +141,14 @@ pub fn download_with_retry_bytes_opt(
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    let digest = hasher.finalize();
+    // Single pre-sized write avoids 32 separate format! allocations.
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(hex, "{:02x}", byte).expect("write to String is infallible");
+    }
+    hex
 }
 
 /// Registry of pinned dataset URLs -> expected SHA-256 (hex).

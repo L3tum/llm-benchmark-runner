@@ -28,11 +28,5 @@ pub fn get_category_order() -> &'static Vec<BenchmarkCategory> {
 
 /// Slugify a category name for HTML tab IDs.
 pub fn slugify_name(name: String) -> String {
-    name.to_lowercase()
-        .replace(" ", "-")
-        .replace("/", "-")
-        .replace("_", "-")
-        .replace("  ", "-")
-        .trim()
-        .to_string()
+    crate::utils::slugify(&name)
 }

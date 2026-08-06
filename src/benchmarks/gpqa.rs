@@ -4,15 +4,15 @@ use crate::config::Model;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 
 /// Single GPQA item from the CSV dataset.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GpqaItem {
     pub question: String,
     pub options: Vec<String>,
@@ -24,6 +24,7 @@ pub struct GpqaBenchmark {
     state: Mutex<GpqaState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GpqaState {
     items: Vec<GpqaItem>,
     current_idx: usize,
@@ -151,7 +152,7 @@ impl Benchmark for GpqaBenchmark {
             items.len()
         );
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.wrong_classes = BTreeMap::new();
@@ -165,7 +166,7 @@ impl Benchmark for GpqaBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (q, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -196,7 +197,7 @@ impl Benchmark for GpqaBenchmark {
         if !is_correct {
             let wrong_class =
                 classify_wrong_answer(&response, &question_text, expected.unwrap_or('?'), pred);
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let counter = state.wrong_classes.entry(wrong_class).or_insert(0);
             *counter += 1;
         }
@@ -450,12 +451,13 @@ impl GpqaBenchmark {
     }
 }
 
-static RE_ANSWER_IS: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\banswer is\s*\(?([A-D])\)?").unwrap());
-static RE_ANSWER_COLON: Lazy<Regex> = Lazy::new(|| Regex::new(r"[aA]nswer:\s*([A-D])").unwrap());
-static RE_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-D])\b").unwrap());
-static RE_SEQUENCE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b[A-D]\b\s*[,;]\s*\b[A-D]\b").unwrap());
+static RE_ANSWER_IS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\banswer is\s*\(?([A-D])\)?").unwrap());
+static RE_ANSWER_COLON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[aA]nswer:\s*([A-D])").unwrap());
+static RE_LETTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-D])\b").unwrap());
+static RE_SEQUENCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[A-D]\b\s*[,;]\s*\b[A-D]\b").unwrap());
 
 fn extract_answer(text: &str) -> Option<char> {
     // Scan entire text for answer patterns, use the last match
@@ -490,4 +492,28 @@ fn extract_answer(text: &str) -> Option<char> {
         }
     }
     last_letter
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_answer_from_answer_patterns() {
+        assert_eq!(extract_answer("The answer is (C)"), Some('C'));
+        assert_eq!(extract_answer("Answer: D"), Some('D'));
+    }
+
+    #[test]
+    fn extract_answer_answer_is_takes_precedence() {
+        // "answer is" wins over "Answer:" even if it comes earlier.
+        assert_eq!(extract_answer("answer is A; final Answer: B"), Some('A'));
+    }
+
+    #[test]
+    fn extract_answer_ignores_sequences() {
+        // A/B pairs in a sequence should be skipped in the fallback path.
+        let out = extract_answer("The options are A, B, C. choose one");
+        assert_eq!(out, Some('C'));
+    }
 }

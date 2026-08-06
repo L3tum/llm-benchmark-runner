@@ -91,7 +91,7 @@ impl Benchmark for EfficientLanguageBenchmark {
         let num_samples = crate::config::extract_usize(config, "num_samples");
         let seed = config.get("seed").and_then(|s| s.as_u64());
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let mut instances = generate_instances().clone();
 
         // Shuffle with optional seed for reproducibility
@@ -123,7 +123,7 @@ impl Benchmark for EfficientLanguageBenchmark {
     ) -> Result<Option<TaskResult>> {
         // Get the next (instance, test) pair, advancing past multi-test instances
         let Some((instance, test, task_id)) = ({
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             'outer: loop {
                 if state.current_idx >= state.instances.len() {
                     break 'outer None;

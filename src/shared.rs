@@ -332,6 +332,63 @@ impl BenchmarkResult {
         }
     }
 
+    /// Produce a canonical JSON representation from the typed scores/breakdowns
+    /// rather than relying on the opaque `.raw` payload. `.raw` is retained for
+    /// backward-compatible deserialization, but report/custom renderers should
+    /// prefer this forward-looking serialization of the normalized result.
+    pub fn to_canonical_json(&self) -> Value {
+        let scores: serde_json::Map<String, Value> = self
+            .scores
+            .iter()
+            .map(|(k, s)| (k.clone(), serde_json::to_value(s).unwrap_or(Value::Null)))
+            .collect();
+        let breakdowns: serde_json::Map<String, Value> = self
+            .breakdowns
+            .iter()
+            .map(|(k, b)| (k.clone(), serde_json::to_value(b).unwrap_or(Value::Null)))
+            .collect();
+        let error_classification: serde_json::Map<String, Value> = self
+            .error_classification
+            .iter()
+            .map(|(k, v)| (format!("{:?}", k), serde_json::json!(v)))
+            .collect();
+        serde_json::json!({
+            "scores": scores,
+            "breakdowns": breakdowns,
+            "error_classification": error_classification,
+            "artifacts": self.artifacts,
+            "diagnostics": self.diagnostics,
+            "raw": self.raw,
+        })
+    }
+
+    /// Debug-only consistency check (enabled by `LLM_BENCH_DUAL_ASSERT=1`): when
+    /// the raw payload carries `total_tasks`/`passed_tasks` and the typed `scores`
+    /// carry `accuracy`, verify they agree (accuracy == passed/total*100). Catches
+    /// drift between the dual data paths during development.
+    pub fn assert_scores_match_raw(&self) {
+        if std::env::var("LLM_BENCH_DUAL_ASSERT").is_err() {
+            return;
+        }
+        if let (Some(total), Some(correct)) = (
+            self.raw.get("total_tasks").and_then(|v| v.as_i64()),
+            self.raw.get("passed_tasks").and_then(|v| v.as_i64()),
+        ) {
+            if let Some(ScoreValue::Float(acc)) = self.scores.get("accuracy").map(|s| &s.value) {
+                let expected = if total > 0 {
+                    correct as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                let actual = *acc;
+                debug_assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "raw ({expected:.2}%) does not match typed accuracy ({actual:.2}%)"
+                );
+            }
+        }
+    }
+
     /// Generate standard tool call scores from aggregated counts.
     /// Returns: tool_calls_total, tool_calls_valid, tool_calls_invalid, tool_call_success_rate.
     pub fn tool_call_scores(total: u64, valid: u64, invalid: u64) -> BTreeMap<String, Score> {
@@ -566,9 +623,16 @@ impl<T> Default for TranslationState<T> {
 }
 
 /// Wrap a prompt value in XML fence tags to mitigate prompt injection attacks.
+/// The value is XML-escaped so that `& < > " '` cannot break out of the fence.
 /// Example: `fence_prompt_value("hello")` → `"<value>hello</value>"`
 pub fn fence_prompt_value(value: &str) -> String {
-    format!("<value>{}</value>", value)
+    let escaped = value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;");
+    format!("<value>{}</value>", escaped)
 }
 
 /// Truncate a string to `max_chars` characters, appending '…' if truncated.
@@ -600,7 +664,7 @@ mod fence_prompt_value_tests {
     fn fence_prompt_value_with_html_chars() {
         assert_eq!(
             fence_prompt_value("<script>alert('xss')</script>"),
-            "<value><script>alert('xss')</script></value>"
+            "<value>&lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;</value>"
         );
     }
 }
@@ -723,5 +787,51 @@ mod from_task_results_tests {
         let result = BenchmarkResult::from_task_results(vec![pass_result("t1")]);
         assert!(!result.scores.contains_key("tool_call_success"));
         assert!(!result.scores.contains_key("tool_calls_total"));
+    }
+
+    #[test]
+    fn to_canonical_json_serializes_typed_data() {
+        // C3: canonical JSON must expose scores/breakdowns/error_classification
+        // (not just the opaque `.raw`), for report/custom-renderer use.
+        let mut r = BenchmarkResult::empty();
+        r.scores.insert(
+            "accuracy".to_string(),
+            Score::float(87.5, ScoreUnit::Percent),
+        );
+        let mut bd = BTreeMap::new();
+        bd.insert("acc".to_string(), Score::float(1.0, ScoreUnit::Ratio));
+        r.breakdowns.insert(
+            "breakdown".to_string(),
+            BreakdownTable {
+                title: "t".to_string(),
+                rows: BTreeMap::from([("row".to_string(), bd)]),
+            },
+        );
+        r.error_classification
+            .insert(WrongAnswerClass::MalformedJson, 4);
+        r.raw = serde_json::json!({"opaque": true});
+
+        let json = r.to_canonical_json();
+        // scores object contains the accuracy score; breakdowns/error_classification present.
+        assert!(json["scores"].get("accuracy").is_some());
+        assert!(json["breakdowns"].get("breakdown").is_some());
+        assert!(json["error_classification"].is_object());
+        assert_eq!(json["raw"]["opaque"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn assert_scores_match_raw_accepts_consistent() {
+        // Consistent data: accuracy 75 == 3/4*100. Only runs when env var set.
+        let mut r = BenchmarkResult::empty();
+        r.raw = serde_json::json!({"total_tasks": 4, "passed_tasks": 3});
+        r.scores.insert(
+            "accuracy".to_string(),
+            Score::float(75.0, ScoreUnit::Percent),
+        );
+        // Without the env var it no-ops; with it, consistent data does not panic.
+        r.assert_scores_match_raw();
+        std::env::set_var("LLM_BENCH_DUAL_ASSERT", "1");
+        r.assert_scores_match_raw(); // should not panic
+        std::env::remove_var("LLM_BENCH_DUAL_ASSERT");
     }
 }

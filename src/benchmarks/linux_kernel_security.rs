@@ -590,7 +590,7 @@ impl Benchmark for LinuxKernelSecurityBenchmark {
 
         let items = load_and_sample_dataset(&cfg)?;
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.config = cfg;
@@ -604,7 +604,7 @@ impl Benchmark for LinuxKernelSecurityBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (commit, cfg) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }

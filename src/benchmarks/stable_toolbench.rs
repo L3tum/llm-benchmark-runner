@@ -124,7 +124,7 @@ impl Benchmark for StableToolBenchBenchmark {
         // Download dataset
         let instances = download_dataset()?;
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.instances = filter_instances(instances, &subsets, &categories, num_samples);
         state.config = StableToolBenchConfig {
             num_samples,
@@ -147,7 +147,7 @@ impl Benchmark for StableToolBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }

@@ -118,7 +118,7 @@ impl Benchmark for FictionalLanguageBenchmark {
             seed.map_or("none".to_string(), |s| s.to_string())
         );
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.instances = instances;
         state.current_idx = 0;
         drop(state);
@@ -133,7 +133,7 @@ impl Benchmark for FictionalLanguageBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (instance, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.instances.len() {
                 return Ok(None);
             }

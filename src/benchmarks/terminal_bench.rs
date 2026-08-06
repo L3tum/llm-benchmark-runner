@@ -157,7 +157,7 @@ impl Benchmark for TerminalBenchBenchmark {
         // Download/verify tasks
         let tasks = download_tasks()?;
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.tasks = filter_tasks(tasks, &categories, num_samples);
         state.config = TerminalBenchConfig {
             num_samples,
@@ -178,7 +178,7 @@ impl Benchmark for TerminalBenchBenchmark {
         tracker: &mut TokenTracker,
     ) -> Result<Option<TaskResult>> {
         let (task, cfg, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.tasks.len() {
                 return Ok(None);
             }

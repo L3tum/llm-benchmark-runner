@@ -4,7 +4,6 @@ use crate::download::download_with_retry_bytes;
 use crate::shared::{BenchmarkCategory, BenchmarkResult, TaskResult};
 use crate::token_tracker::TokenTracker;
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use rand::prelude::SliceRandom;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -13,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 
 /// Single SuperGPQA item from the JSONL dataset.
@@ -35,6 +35,7 @@ pub struct SuperGpqaBenchmark {
     state: Mutex<SuperGpqaState>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SuperGpqaState {
     items: Vec<SuperGpqaItem>,
     current_idx: usize,
@@ -175,7 +176,7 @@ impl Benchmark for SuperGpqaBenchmark {
 
         println!("Evaluating SuperGPQA: {} total questions", items.len());
 
-        let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.items = items;
         state.current_idx = 0;
         state.wrong_classes = BTreeMap::new();
@@ -191,7 +192,7 @@ impl Benchmark for SuperGpqaBenchmark {
         use crate::benchmarks::answer_classifier::classify_wrong_answer;
 
         let (q, idx) = {
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.current_idx >= state.items.len() {
                 return Ok(None);
             }
@@ -221,7 +222,7 @@ impl Benchmark for SuperGpqaBenchmark {
         if !is_correct {
             let wrong_class =
                 classify_wrong_answer(&response, &question_text, expected.unwrap_or('?'), pred);
-            let mut state = self.state.lock().expect(crate::shared::MUTEX_PANIC_MSG);
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let counter = state.wrong_classes.entry(wrong_class).or_insert(0);
             *counter += 1;
         }
@@ -437,12 +438,13 @@ impl SuperGpqaBenchmark {
 }
 
 // Precompiled regexes to avoid repeated compilation overhead during evaluation
-static RE_ANSWER_IS: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\banswer is\s*\(?([A-J])\)?").unwrap());
-static RE_ANSWER_COLON: Lazy<Regex> = Lazy::new(|| Regex::new(r"[aA]nswer:\s*([A-J])").unwrap());
-static RE_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([A-J])\b").unwrap());
-static RE_SEQUENCE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b[A-J]\b\s*[,;]\s*\b[A-J]\b").unwrap());
+static RE_ANSWER_IS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\banswer is\s*\(?([A-J])\)?").unwrap());
+static RE_ANSWER_COLON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[aA]nswer:\s*([A-J])").unwrap());
+static RE_LETTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-J])\b").unwrap());
+static RE_SEQUENCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[A-J]\b\s*[,;]\s*\b[A-J]\b").unwrap());
 
 fn extract_answer(text: &str) -> Option<char> {
     // Scan entire text for answer patterns, use the last match
