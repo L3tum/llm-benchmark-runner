@@ -22,7 +22,10 @@ docker:
     swebench_harness: llm-benchmark-runner/swebench-harness:latest
   build_images: true
   max_workers: 1
-  mount_docker_socket: true
+  # Keep disabled: mounting the host Docker socket grants container-escape
+  # root access. Only needed for docker-in-docker benchmarks (terminal_bench),
+  # none of which run under this test config.
+  mount_docker_socket: false
   docker_socket_path: /var/run/docker.sock
   # host_repo_path: /host/path/to/llm-benchmark-runner
 

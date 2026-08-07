@@ -26,7 +26,11 @@ pub fn filter_kld_by_models(
             .rows
             .iter()
             .filter(|(key, _)| {
-                if let Some((a, b)) = key.split_once('_') {
+                // Pair keys are formatted "{a}_vs_{b}"; split on the full
+                // "_vs_" delimiter so model names containing underscores are
+                // parsed correctly (model_a_vs_model_b must yield a/b, not a
+                // truncated at the first underscore).
+                if let Some((a, b)) = key.split_once("_vs_") {
                     model_names.contains(a) && model_names.contains(b)
                 } else {
                     false
@@ -518,10 +522,10 @@ mod tests {
         let mut rows = BTreeMap::new();
         let mut row = BTreeMap::new();
         row.insert("avg_kld".to_string(), Score::float(0.5, ScoreUnit::Kld));
-        rows.insert("ModelA_ModelB".to_string(), row);
+        rows.insert("ModelA_vs_ModelB".to_string(), row);
         let mut row2 = BTreeMap::new();
         row2.insert("avg_kld".to_string(), Score::float(0.7, ScoreUnit::Kld));
-        rows.insert("ModelA_ModelC".to_string(), row2);
+        rows.insert("ModelA_vs_ModelC".to_string(), row2);
         BenchmarkResult {
             scores: BTreeMap::new(),
             breakdowns: BTreeMap::from([(
@@ -549,13 +553,42 @@ mod tests {
         let names: HashSet<&str> = ["ModelA", "ModelB"].into_iter().collect();
         let out = filter_kld_by_models(&sample_result(), &names);
         let bd = out.breakdowns.get("pairwise_kld").unwrap();
-        // Only the ModelA_ModelB pair survives (both in comparison).
-        assert!(bd.rows.contains_key("ModelA_ModelB"));
-        assert!(!bd.rows.contains_key("ModelA_ModelC"));
+        // Only the ModelA_vs_ModelB pair survives (both in comparison).
+        assert!(bd.rows.contains_key("ModelA_vs_ModelB"));
+        assert!(!bd.rows.contains_key("ModelA_vs_ModelC"));
         // raw avg_kld_to_others filtered to the comparison models.
         let raw = out.raw.get("avg_kld_to_others").unwrap();
         assert_eq!(raw.get("ModelA").unwrap(), &serde_json::json!(0.5));
         assert!(raw.get("ModelC").is_none());
+    }
+
+    #[test]
+    fn filter_handles_underscores_in_model_names() {
+        // A model whose display name contains an underscore must still be
+        // parsed correctly from the "{a}_vs_{b}" pair key (regression test for
+        // splitting on the first underscore).
+        let mut rows = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert("avg_kld".to_string(), Score::float(0.3, ScoreUnit::Kld));
+        rows.insert("My_Model_vs_Other".to_string(), row);
+        let result = BenchmarkResult {
+            scores: BTreeMap::new(),
+            breakdowns: BTreeMap::from([(
+                "pairwise_kld".to_string(),
+                BreakdownTable {
+                    title: "Pairwise KLD".to_string(),
+                    rows,
+                },
+            )]),
+            error_classification: BTreeMap::new(),
+            artifacts: vec![],
+            diagnostics: vec![],
+            raw: serde_json::json!({}),
+        };
+        let names: HashSet<&str> = ["My_Model", "Other"].into_iter().collect();
+        let out = filter_kld_by_models(&result, &names);
+        let bd = out.breakdowns.get("pairwise_kld").unwrap();
+        assert!(bd.rows.contains_key("My_Model_vs_Other"));
     }
 
     fn lp(token: &str, logprob: f64) -> LogprobEntry {

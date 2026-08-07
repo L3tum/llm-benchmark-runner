@@ -208,6 +208,9 @@ pub fn extract_bool(config: &yaml_serde::Value, key: &str) -> Option<bool> {
     if let yaml_serde::Value::Mapping(map) = config {
         if let Some(val) = map.get(yaml_serde::Value::String(key.to_string())) {
             // yaml_serde may represent booleans as strings (case-insensitive)
+            if let yaml_serde::Value::Bool(b) = val {
+                return Some(*b);
+            }
             if let yaml_serde::Value::String(s) = val {
                 let lower = s.trim().to_lowercase();
                 return Some(matches!(lower.as_str(), "true" | "yes" | "1" | "on"));
@@ -287,6 +290,16 @@ mod tests {
     #[test]
     fn extract_bool_false() {
         let cfg = make_config(vec![("off", serde_json::json!("false"))]);
+        assert_eq!(extract_bool(&cfg, "off"), Some(false));
+    }
+
+    #[test]
+    fn extract_bool_native_yaml_bool() {
+        // Unquoted YAML `true`/`false` deserialize to yaml_serde::Value::Bool,
+        // not a string. This must be handled explicitly.
+        let cfg = make_config(vec![("on", serde_json::json!(true))]);
+        assert_eq!(extract_bool(&cfg, "on"), Some(true));
+        let cfg = make_config(vec![("off", serde_json::json!(false))]);
         assert_eq!(extract_bool(&cfg, "off"), Some(false));
     }
 

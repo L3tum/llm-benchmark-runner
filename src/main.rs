@@ -176,7 +176,14 @@ impl TimingAccumulator {
                 if !future_completed.contains(bench) {
                     let bench_avg = self.bench_sum.get(bench).map(|s| {
                         let n = *self.bench_count.get(bench).unwrap_or(&0);
-                        s.div_f64(n as f64)
+                        if n > 0 {
+                            s.div_f64(n as f64)
+                        } else {
+                            // No completed timings for this benchmark yet; fall
+                            // back to the overall average to avoid NaN from
+                            // div_f64(0.0).
+                            overall_avg
+                        }
                     });
                     remaining_est += bench_avg.unwrap_or(overall_avg);
                 }
@@ -367,12 +374,25 @@ fn run_benchmarks(config_path: &str, no_resume: bool) -> Result<()> {
             eta_str
         );
 
-        // Update in-memory results
-        all_models_results.insert(model.display_name.clone(), model_result);
+        // Update in-memory results: merge the re-run (previously failed) results
+        // into any already-completed results for this model. Replacing the whole
+        // entry would discard successful benchmarks completed before the resume.
+        all_models_results
+            .entry(model.display_name.clone())
+            .or_default()
+            .extend(model_result);
 
-        // Track per-model completed/failed so each model keeps its own lists.
-        completed_benchmarks_per_model.insert(model.display_name.clone(), new_successful.clone());
-        failed_benchmarks_per_model.insert(model.display_name.clone(), new_failed.clone());
+        // Merge newly-completed benchmarks into the model's completed list so
+        // benchmarks finished in an earlier run are not forgotten across resumes
+        // (otherwise the next resume would re-run them).
+        let mut merged_completed = model_completed_benchmarks.clone();
+        for b in new_successful {
+            if !merged_completed.contains(&b) {
+                merged_completed.push(b);
+            }
+        }
+        completed_benchmarks_per_model.insert(model.display_name.clone(), merged_completed);
+        failed_benchmarks_per_model.insert(model.display_name.clone(), new_failed);
 
         save_results(
             &all_models_results,

@@ -238,7 +238,9 @@ fn filter_comparison_models(
     comparison: &Comparison,
 ) -> HashMap<String, HashMap<String, BenchmarkResult>> {
     if comparison.models.is_empty() {
-        return all_models_results.clone();
+        // A comparison with no models selected should include no models, not
+        // fall back to every model. Callers additionally skip empty comparisons.
+        return HashMap::new();
     }
 
     let model_names: HashSet<&str> = comparison.models.iter().map(|s| s.as_str()).collect();
