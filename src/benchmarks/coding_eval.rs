@@ -7,7 +7,7 @@ use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -188,23 +188,6 @@ fn parse_config(config: &yaml_serde::Value) -> Result<CodingEvalConfig> {
         .get("timeout_secs")
         .and_then(|v| v.as_i64())
         .unwrap_or(8);
-    let enable_pass2 = config
-        .get("enable_pass2")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let enable_pass3 = config
-        .get("enable_pass3")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let mut language_images: HashMap<String, String> = HashMap::new();
-    if let Some(l) = config.get("language_images").and_then(|v| v.as_mapping()) {
-        for (lang, img) in l {
-            if let (Some(lang_str), Some(img_str)) = (lang.as_str(), img.as_str()) {
-                language_images.insert(lang_str.to_string(), img_str.to_string());
-            }
-        }
-    }
 
     let tasksets: Vec<TasksetConfig> =
         if let Some(t) = config.get("tasksets").and_then(|v| v.as_sequence()) {
@@ -213,21 +196,7 @@ fn parse_config(config: &yaml_serde::Value) -> Result<CodingEvalConfig> {
                     let name = item.get("name")?.as_str()?.to_string();
                     let task_type_str = item.get("task_type")?.as_str()?;
                     let task_type = TaskType::from_key(task_type_str)?;
-                    let language = item
-                        .get("language")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("python")
-                        .to_string();
-                    let tasks_path = item
-                        .get("tasks_path")
-                        .and_then(|v| v.as_str())
-                        .map(PathBuf::from);
-                    Some(TasksetConfig {
-                        name,
-                        task_type,
-                        language,
-                        tasks_path,
-                    })
+                    Some(TasksetConfig { name, task_type })
                 })
                 .collect()
         } else {
@@ -235,24 +204,13 @@ fn parse_config(config: &yaml_serde::Value) -> Result<CodingEvalConfig> {
             vec![TasksetConfig {
                 name: "HumanEval".to_string(),
                 task_type: TaskType::HumanEval,
-                language: "python".to_string(),
-                tasks_path: None,
             }]
         };
-
-    let host_repo_path = config
-        .get("host_repo_path")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from);
 
     Ok(CodingEvalConfig {
         tasksets,
         num_samples,
         timeout_secs: timeout_secs as u64,
-        enable_pass2,
-        enable_pass3,
-        language_images,
-        host_repo_path,
     })
 }
 
@@ -290,24 +248,16 @@ impl TaskType {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)] // language and tasks_path reserved for future multi-language support
 struct TasksetConfig {
     name: String,
     task_type: TaskType,
-    language: String,
-    tasks_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)] // pass2/pass3/multi-language/host-repo fields reserved for full harness support
 struct CodingEvalConfig {
     tasksets: Vec<TasksetConfig>,
     num_samples: Option<usize>,
     timeout_secs: u64,
-    enable_pass2: bool,
-    enable_pass3: bool,
-    language_images: HashMap<String, String>,
-    host_repo_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

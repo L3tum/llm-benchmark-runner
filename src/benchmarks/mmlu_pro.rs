@@ -6,7 +6,7 @@ use crate::token_tracker::TokenTracker;
 use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -99,20 +99,6 @@ impl MmluProBenchmark {
         let content = fs::read_to_string(path)?;
         let items: Vec<MmluItem> = serde_json::from_str(&content)?;
         Ok(items)
-    }
-
-    #[allow(dead_code)] // reserved for category-level aggregation
-    fn group_by_category(items: Vec<MmluItem>) -> HashMap<String, Vec<MmluItem>> {
-        let mut groups: HashMap<String, Vec<MmluItem>> = HashMap::new();
-        for item in items {
-            let options: Vec<String> = item.options.into_iter().filter(|o| o != "N/A").collect();
-            let category = item.category.clone();
-            groups
-                .entry(category)
-                .or_default()
-                .push(MmluItem { options, ..item });
-        }
-        groups
     }
 }
 

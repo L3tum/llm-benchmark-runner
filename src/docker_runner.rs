@@ -95,6 +95,9 @@ pub struct DockerRunConfig {
     pub no_new_privileges: bool,
     pub pids_limit: Option<u64>,
     pub memory: Option<String>,
+    pub cpus: Option<f64>,
+    pub gpus: Option<String>,
+    pub storage_mb: Option<u64>,
     pub name_prefix: String,
 }
 
@@ -115,6 +118,9 @@ impl DockerRunConfig {
             no_new_privileges: true,
             pids_limit: Some(128),
             memory: Some("512m".to_string()),
+            cpus: None,
+            gpus: None,
+            storage_mb: None,
             name_prefix: "llm-benchmark-runner".to_string(),
         }
     }
@@ -311,6 +317,16 @@ impl DockerRunner {
         }
         if let Some(memory) = &config.memory {
             cmd.arg("--memory").arg(memory);
+        }
+        if let Some(cpus) = config.cpus {
+            cmd.arg("--cpus").arg(cpus.to_string());
+        }
+        if let Some(gpus) = &config.gpus {
+            cmd.arg("--gpus").arg(gpus);
+        }
+        if let Some(storage_mb) = config.storage_mb {
+            cmd.arg("--storage-opt")
+                .arg(format!("size={}m", storage_mb));
         }
         for mount in &config.mounts {
             let source: PathBuf = if mount.map_host_repo_path {

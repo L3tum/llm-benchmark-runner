@@ -74,20 +74,16 @@ fn default_category() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // resource fields kept for schema alignment
 struct EnvConfig {
     #[serde(default)]
     docker_image: String,
     #[serde(default)]
-    #[allow(dead_code)] // kept for schema completeness
     cpus: u64,
     #[serde(default = "default_memory")]
     memory_mb: u64,
     #[serde(default = "default_storage")]
-    #[allow(dead_code)] // kept for schema completeness
     storage_mb: u64,
     #[serde(default)]
-    #[allow(dead_code)] // kept for schema completeness
     gpus: u64,
     #[serde(default)]
     allow_internet: bool,
@@ -102,14 +98,9 @@ fn default_storage() -> u64 {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // num_samples and categories reserved for future filtering
 struct TerminalBenchConfig {
-    #[allow(dead_code)] // kept for future sampling support
-    num_samples: Option<usize>,
     max_iterations: usize,
     timeout_secs: u64,
-    #[allow(dead_code)] // kept for future filtering support
-    categories: Option<Vec<String>>,
 }
 
 impl Default for TerminalBenchBenchmark {
@@ -119,10 +110,8 @@ impl Default for TerminalBenchBenchmark {
                 tasks: Vec::new(),
                 current_idx: 0,
                 config: TerminalBenchConfig {
-                    num_samples: None,
                     max_iterations: 50,
                     timeout_secs: 900, // 15 min default
-                    categories: None,
                 },
             }),
         }
@@ -160,10 +149,8 @@ impl Benchmark for TerminalBenchBenchmark {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.tasks = filter_tasks(tasks, &categories, num_samples);
         state.config = TerminalBenchConfig {
-            num_samples,
             max_iterations,
             timeout_secs,
-            categories,
         };
         state.current_idx = 0;
 
@@ -561,6 +548,27 @@ fn execute_single_task(
                 .map(|e| e.memory_mb)
                 .unwrap_or(4096)
         )),
+        cpus: task.environment.as_ref().and_then(|e| {
+            if e.cpus > 0 {
+                Some(e.cpus as f64)
+            } else {
+                None
+            }
+        }),
+        gpus: task.environment.as_ref().and_then(|e| {
+            if e.gpus > 0 {
+                Some(e.gpus.to_string())
+            } else {
+                None
+            }
+        }),
+        storage_mb: task.environment.as_ref().and_then(|e| {
+            if e.storage_mb > 0 {
+                Some(e.storage_mb)
+            } else {
+                None
+            }
+        }),
         name_prefix: "terminal-bench".to_string(),
     };
 

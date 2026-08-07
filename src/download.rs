@@ -291,7 +291,6 @@ pub fn lookup_checksum(url: &str) -> Option<&'static str> {
 ///
 /// Part of the parquet-migration infrastructure for benchmarks whose datasets
 /// moved to HF parquet shards. Consumed by `download_parquet_records`.
-#[allow(dead_code)] // used by benchmarks during the parquet migration
 fn arrow_value_to_json(col: &dyn arrow::array::Array, row: usize) -> serde_json::Value {
     use arrow::array::{
         Array as _, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,

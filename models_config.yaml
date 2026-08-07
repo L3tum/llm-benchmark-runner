@@ -197,8 +197,6 @@ benchmark:
     # Requires Docker. Oracle-separated EvalPlus-style evaluation.
     num_samples: 10
     timeout_secs: 8
-    enable_pass2: false
-    enable_pass3: false
   humaneval:
     # Original HumanEval uses public tests embedded in the dataset.
     num_samples: 10

@@ -201,8 +201,6 @@ benchmark:
   humaneval_plus:
     num_samples: 10
     timeout_secs: 8
-    enable_pass2: false
-    enable_pass3: false
   mbpp_plus:
     num_samples: 10
   multipl_e:
@@ -561,9 +559,7 @@ Docker-backed function-completion evaluation using **EvalPlus-style** oracle-sep
 - **`mbpp_plus`** — MBPP+ (EvalPlus, includes adversarial tests)
 - **`humaneval`** — original HumanEval (public tests only)
 
-`enable_pass2`/`enable_pass3` enable iterative repair: the failed solution and error summary are fed back to the model. If an earlier attempt passes, later attempts are skipped.
-
-**Config options:** `num_samples`, `timeout_secs`, `enable_pass2`, `enable_pass3`, `language_images` (custom Docker image per language).
+**Config options:** `num_samples`, `timeout_secs`.
 
 Generated code is saved under `benchmark_results/coding_eval_runs/...`.
 

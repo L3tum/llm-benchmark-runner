@@ -182,12 +182,9 @@ struct SweBenchConfig {
     dataset: SweBenchDataset,
     dataset_id: String,
     split: String,
-    #[allow(dead_code)]
-    // parsed from config but not yet consumed by harness; reserved for sampling support
     num_samples: Option<usize>,
     token_env: Option<String>,
     timeout_secs: u64,
-    #[allow(dead_code)] // parsed from config but not yet consumed; reserved for local repo cloning
     host_repo_path: Option<PathBuf>,
     harness_image: String,
     build_images: bool,
@@ -253,7 +250,10 @@ impl Benchmark for SweBenchBenchmark {
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench: {} instances", items.len());
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.items = items;
+        state.items = match cfg.num_samples {
+            Some(n) => items.into_iter().take(n).collect(),
+            None => items,
+        };
         state.current_idx = 0;
         state.dataset = SweBenchDataset::Basic;
         state.config = Some(cfg);
@@ -338,7 +338,10 @@ impl Benchmark for SweBenchVerifiedBenchmark {
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Verified: {} instances", items.len());
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.items = items;
+        state.items = match cfg.num_samples {
+            Some(n) => items.into_iter().take(n).collect(),
+            None => items,
+        };
         state.current_idx = 0;
         state.config = Some(cfg);
         Ok(())
@@ -426,7 +429,10 @@ impl Benchmark for SweBenchProBenchmark {
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Pro: {} instances", items.len());
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.items = items;
+        state.items = match cfg.num_samples {
+            Some(n) => items.into_iter().take(n).collect(),
+            None => items,
+        };
         state.current_idx = 0;
         state.config = Some(cfg);
         Ok(())
@@ -514,7 +520,10 @@ impl Benchmark for SweBenchMultilingualBenchmark {
         let items = load_or_download_dataset(&cfg)?;
         println!("SWE-Bench Multilingual: {} instances", items.len());
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.items = items;
+        state.items = match cfg.num_samples {
+            Some(n) => items.into_iter().take(n).collect(),
+            None => items,
+        };
         state.current_idx = 0;
         state.config = Some(cfg);
         Ok(())
@@ -1307,19 +1316,6 @@ fn download_hf_rows(cfg: &SweBenchConfig) -> Result<Vec<SweBenchInstance>> {
     Ok(rows)
 }
 
-// Build patch prompt for an SWE-bench instance (used by harness).
-#[allow(dead_code)] // utility kept for harness/prediction prompt generation; not on the hot execute_one path
-fn build_patch_prompt(instance: &SweBenchInstance) -> String {
-    format!(
-        "You are solving a SWE-Bench repository issue. Return ONLY a unified diff patch. Do not include markdown fences, explanations, or prose.\n\nRepository: {}\nBase commit: {}\nInstance: {}\n\nProblem statement:\n{}\n\nHints:\n{}\n\nReturn the patch now.",
-        instance.repo,
-        instance.base_commit,
-        instance.instance_id,
-        instance.problem_statement,
-        instance.hints_text.as_deref().unwrap_or("")
-    )
-}
-
 fn extract_diff(response: &str) -> String {
     let trimmed = response.trim();
     if let Some(start) = trimmed.find("```") {
@@ -1596,23 +1592,6 @@ You have {} iterations maximum. Be efficient with your commands.",
         instance.instance_id,
         cfg.max_iterations
     ))
-}
-
-#[allow(dead_code)] // kept for future debugging of harness output
-fn parse_resolved_count_from_files(json_files: &[PathBuf]) -> Option<usize> {
-    let mut best = None;
-    for path in json_files {
-        let Ok(content) = fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<JsonValue>(&content) else {
-            continue;
-        };
-        if let Some(count) = resolved_count_from_json(&value) {
-            best = Some(best.map_or(count, |current: usize| current.max(count)));
-        }
-    }
-    best
 }
 
 // Recursively collect JSON files from harness output

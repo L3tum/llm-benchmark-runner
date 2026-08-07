@@ -53,8 +53,6 @@ benchmark:
   humaneval_plus:
     num_samples: 1
     timeout_secs: 8
-    enable_pass2: false
-    enable_pass3: false
   swebench_verified:
     num_samples: 1
     split: test
