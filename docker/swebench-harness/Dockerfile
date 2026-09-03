@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 
 # Reusable SWE-Bench harness image for llm-benchmark-runner.
 #
@@ -13,7 +13,7 @@
 # and mounts /var/run/docker.sock so the harness can create per-instance
 # evaluation containers on the host Docker daemon.
 
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-bookworm@sha256:528257d48c1da0dcecc2e725d1ae34498d60c965f1241e39cd6a85a8859bdf84
 
 ARG SWEBENCH_VERSION=4.1.0
 
