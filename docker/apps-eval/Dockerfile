@@ -1,2 +1,2 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:23b5dc88c7dd47fec3f960b51dc30d19df9875cfbfc60f3b62d3e5b88cbccf62
 WORKDIR /work
