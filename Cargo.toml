@@ -50,5 +50,5 @@ lto = "fat"
 codegen-units = 1
 
 [dev-dependencies]
-mockall = "0.11"  # for mocking HTTP client in tests
-mockito = "1.2"  # for blocking HTTP server mocking in tests
+mockall = "=0.11.4"  # for mocking HTTP client in tests
+mockito = "=1.7.2"  # for blocking HTTP server mocking in tests
